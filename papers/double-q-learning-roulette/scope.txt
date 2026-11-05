@@ -1,0 +1,21 @@
+Paper: Double Q-learning (van Hasselt, 2010)
+Venue: NeurIPS 2010
+
+What to reproduce
+Only the roulette experiment (Section 4.1): Q-learning and Double Q-learning, with the same learning-rate
+schedules, trial counts and number of runs as the paper. The grid world experiment (Section 4.2) is out of
+scope; do not extract claims from it.
+
+Compute budget
+- No GPU. CPU only.
+- Hardware: laptop CPU
+- If the scope cannot fit the budget, reduce it, and say what you cut and why.
+
+Report
+- The measured result for each claim of this experiment, with run IDs.
+- A verdict: reproduced, partially reproduced, not reproduced, or could not test, with the reason.
+- Every assumption or deviation from the paper (seeds, training length, details the paper does not state).
+
+Rules
+- Do not use the authors' code or third-party reproductions of this paper.
+- Standard libraries (PyTorch, JAX, NumPy, SciPy, torchvision models, public datasets) are fine.

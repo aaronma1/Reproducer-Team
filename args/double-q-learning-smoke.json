@@ -1,0 +1,2 @@
+{"paper": "double-q-learning", "compute": "local", "smoke": true, "max_claims": 2, "gpu_hours": 0.1,
+ "max_spec_tries": 3, "max_plan_tries": 3, "max_rounds": 2}

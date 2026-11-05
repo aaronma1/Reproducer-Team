@@ -1,0 +1,24 @@
+{
+  "package_type": "agent_template",
+  "name": "judge",
+  "display_name": {
+    "en": "Judge",
+    "zh": "裁定员"
+  },
+  "description": "Sets the final verdict per claim next to the rule verdicts, explaining every departure.",
+  "persona": {
+    "dir": "persona"
+  },
+  "tools": [
+    {
+      "file": "tools/view_page.py",
+      "class": "ViewPage"
+    }
+  ],
+  "rails": [
+    {
+      "file": "rails/policy_rail.py",
+      "class": "RunPolicyRail"
+    }
+  ]
+}

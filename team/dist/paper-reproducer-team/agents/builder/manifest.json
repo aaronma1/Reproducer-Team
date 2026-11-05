@@ -1,0 +1,24 @@
+{
+  "package_type": "agent_template",
+  "name": "builder",
+  "display_name": {
+    "en": "Builder",
+    "zh": "实验构建者"
+  },
+  "description": "Implements and runs one experiment in repo/arms/<experiment>/ and writes one JSON file per run.",
+  "persona": {
+    "dir": "persona"
+  },
+  "tools": [
+    {
+      "file": "tools/view_page.py",
+      "class": "ViewPage"
+    }
+  ],
+  "rails": [
+    {
+      "file": "rails/policy_rail.py",
+      "class": "RunPolicyRail"
+    }
+  ]
+}

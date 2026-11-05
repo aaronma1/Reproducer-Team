@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reproducer Flow Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root {
+  /* Layout idea: a lab notebook for one pipeline. Left rail of phase numbers, wide figures, dense reference tables. */
+  --ink: #18222b;
+  --muted: #56646f;
+  --paper: #f6f7f5;
+  --panel: #ffffff;
+  --rule: #d6dbd8;
+  --accent: #0d6b72;      /* the flow itself: phases, arrows that carry work */
+  --check: #a3620a;       /* checks, caps, gates */
+  --fail: #b3362b;
+  --ok: #2f7a3e;
+  --accent-soft: #e2f0f0;
+  --check-soft: #f8ecd9;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ink: #e4e9ec; --muted: #9aa8b1; --paper: #11171c; --panel: #172028; --rule: #2b3640;
+    --accent: #4fc3c9; --check: #e0a54a; --fail: #f07a6e; --ok: #74c487;
+    --accent-soft: #12323a; --check-soft: #3a2c16; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ink: #e4e9ec; --muted: #9aa8b1; --paper: #11171c; --panel: #172028; --rule: #2b3640;
+  --accent: #4fc3c9; --check: #e0a54a; --fail: #f07a6e; --ok: #74c487;
+  --accent-soft: #12323a; --check-soft: #3a2c16; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--paper); color: var(--ink); font: 16px/1.6 var(--font-body); }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 40px 24px 80px; }
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.2; text-wrap: balance; margin: 0; }
+h1 { font-size: 2.6rem; font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 1.7rem; font-weight: 600; margin-top: 56px; padding-top: 18px; border-top: 2px solid var(--ink); display: flex; gap: 14px; align-items: baseline; }
+h2 .n { font-family: var(--font-mono); font-size: 0.95rem; color: var(--accent); font-weight: 500; }
+h3 { font-size: 1.2rem; font-weight: 600; margin-top: 28px; }
+p, li { max-width: 72ch; }
+p { margin: 12px 0; }
+a { color: var(--accent); }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+code { background: var(--accent-soft); padding: 1px 5px; border-radius: 3px; }
+.lede { font-size: 1.12rem; color: var(--ink); max-width: 70ch; margin-top: 16px; }
+.meta { color: var(--muted); font-size: 0.92rem; margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.toc { margin-top: 28px; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 24px; padding: 16px 18px; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; }
+.toc a { text-decoration: none; color: var(--ink); font-size: 0.95rem; }
+.toc a span { font-family: var(--font-mono); color: var(--accent); margin-right: 8px; font-size: 0.85rem; }
+.toc a:hover, .toc a:focus-visible { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+figure { margin: 24px 0; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 18px; overflow-x: auto; }
+figure svg { display: block; width: 100%; height: auto; min-width: 760px; color: var(--ink); }
+figcaption { color: var(--muted); font-size: 0.92rem; margin-top: 10px; max-width: 80ch; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin: 18px 0; }
+.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; }
+.card h4 { margin: 0 0 6px; font-family: var(--font-display); font-size: 1.05rem; font-weight: 600; }
+.card p, .card li { font-size: 0.95rem; }
+.card ul { margin: 6px 0 0; padding-left: 18px; }
+.card.gate { border-left: 4px solid var(--check); }
+.card.flow { border-left: 4px solid var(--accent); }
+.table-wrap { overflow-x: auto; margin: 16px 0; border: 1px solid var(--rule); border-radius: 6px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--font-display); font-weight: 600; font-size: 0.9rem; background: var(--accent-soft); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.mono, td code { white-space: nowrap; }
+.pill { display: inline-block; font-family: var(--font-mono); font-size: 0.78rem; padding: 1px 8px; border-radius: 10px; border: 1px solid currentColor; white-space: nowrap; }
+.pill.strong { color: var(--accent); }
+.pill.cheap { color: var(--check); }
+.pill.ok { color: var(--ok); }
+.pill.fail { color: var(--fail); }
+.pill.cap { color: var(--check); }
+.yes { color: var(--ok); font-weight: 600; }
+.no { color: var(--muted); }
+pre { font-family: var(--font-mono); font-size: 0.84rem; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; overflow-x: auto; line-height: 1.5; }
+.timeline { list-style: none; padding: 0; margin: 16px 0; border-left: 2px solid var(--rule); }
+.timeline li { padding: 4px 0 10px 18px; position: relative; max-width: 90ch; }
+.timeline li::before { content: ""; position: absolute; left: -6px; top: 12px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.timeline .d { font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent); margin-right: 8px; }
+.note { border-left: 4px solid var(--fail); background: var(--panel); padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+@media (max-width: 420px) { h1 { font-size: 2rem; } .wrap { padding: 28px 16px 60px; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Reproducer Flow Architecture</h1>
+  <p class="lede">An agent team that takes one paper and its <code>scope.txt</code>, picks the claims to reproduce, implements and runs the experiments on a shared GPU, computes every result twice from the raw run files, and judges each claim against the paper's own numbers. This page describes the design as of the open-ended rewrite of 4 November 2026.</p>
+  <div class="meta">
+    <span>Code: <code>flows/reproducer_flow.py</code> (946 lines) + <code>framework/</code> (1,537 lines)</span>
+    <span>Tests: 93 passing</span>
+    <span>Engine: openjiuwen SwarmFlow, run headless</span>
+  </div>
+  <nav class="toc" aria-label="Contents">
+    <a href="#overview"><span>01</span>Pipeline at a glance</a>
+    <a href="#phases"><span>02</span>Phases in detail</a>
+    <a href="#roles"><span>03</span>Roles, models, access</a>
+    <a href="#runfiles"><span>04</span>Run-file contract</a>
+    <a href="#figures"><span>05</span>Reading numbers off figures</a>
+    <a href="#verdicts"><span>06</span>Verdicts and caps</a>
+    <a href="#gates"><span>07</span>Every hard-coded gate</a>
+    <a href="#agentloop"><span>08</span>The agent loop</a>
+    <a href="#sandbox"><span>09</span>Sandbox and GPU</a>
+    <a href="#durability"><span>10</span>Journal, resume, pause</a>
+    <a href="#config"><span>11</span>Arguments and config</a>
+    <a href="#outputs"><span>12</span>Outputs</a>
+    <a href="#history"><span>13</span>How it got here</a>
+    <a href="#open"><span>14</span>Known gaps</a>
+  </nav>
+</header>
+
+<section id="overview">
+<h2><span class="n">01</span>Pipeline at a glance</h2>
+<p>Six phases. Work flows left to right; checks sit on the arrows. Each experiment builds in parallel with the others, but every GPU job waits in one shared queue that runs a single job at a time.</p>
+<figure>
+<svg viewBox="0 0 1080 430" role="img" aria-label="The pipeline: lead reads claims and figure readers read plot numbers, builders and reviewers iterate per experiment from pilot to full runs, an evaluator and an independent auditor compute every claim, an optional tuner iterates towards the paper's numbers, then rule verdicts and a judge, then the report.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="arrowc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c47f17"/></marker>
+  </defs>
+  <g font-family="IBM Plex Sans, Arial, sans-serif" font-size="12" fill="currentColor">
+    <!-- phase headers -->
+    <g font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="20" y="22">1 LEAD</text><text x="250" y="22">2 BUILD (per experiment)</text><text x="560" y="22">3 EVALUATE</text><text x="740" y="22">4 TUNE</text><text x="890" y="22">5 JUDGE · 6 REPORT</text>
+    </g>
+    <!-- inputs -->
+    <rect x="20" y="40" width="150" height="46" rx="4" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+    <text x="95" y="60" text-anchor="middle">paper.pdf + scope.txt</text><text x="95" y="76" text-anchor="middle" font-size="11" opacity="0.7">every role may read</text>
+    <!-- lead -->
+    <rect x="20" y="120" width="150" height="58" rx="4" fill="none" stroke="#1b9aa2" stroke-width="2"/>
+    <text x="95" y="143" text-anchor="middle" font-weight="600">lead · turn 1</text><text x="95" y="160" text-anchor="middle" font-size="11">arms + claims</text>
+    <rect x="20" y="210" width="150" height="58" rx="4" fill="none" stroke="#1b9aa2" stroke-width="2"/>
+    <text x="95" y="233" text-anchor="middle" font-weight="600">figure × 2 per claim</text><text x="95" y="250" text-anchor="middle" font-size="11">read plot numbers</text>
+    <rect x="20" y="300" width="150" height="58" rx="4" fill="none" stroke="#1b9aa2" stroke-width="2"/>
+    <text x="95" y="323" text-anchor="middle" font-weight="600">lead · turn 2</text><text x="95" y="340" text-anchor="middle" font-size="11">experiments</text>
+    <line x1="95" y1="86" x2="95" y2="118" stroke="currentColor" marker-end="url(#arrow)"/>
+    <line x1="95" y1="178" x2="95" y2="208" stroke="currentColor" marker-end="url(#arrow)"/>
+    <line x1="95" y1="268" x2="95" y2="298" stroke="currentColor" marker-end="url(#arrow)"/>
+    <text x="104" y="198" font-size="11" fill="#c47f17">claim checks</text>
+    <text x="104" y="288" font-size="11" fill="#c47f17">uncertainty → tolerance</text>
+    <!-- build lane -->
+    <rect x="240" y="60" width="290" height="300" rx="6" fill="none" stroke="currentColor" opacity="0.35"/>
+    <rect x="262" y="90" width="110" height="56" rx="4" fill="none" stroke="#1b9aa2" stroke-width="2"/>
+    <text x="317" y="114" text-anchor="middle" font-weight="600">builder</text><text x="317" y="131" text-anchor="middle" font-size="11">code + GPU jobs</text>
+    <rect x="400" y="90" width="110" height="56" rx="4" fill="none" stroke="#c47f17" stroke-width="2"/>
+    <text x="455" y="114" text-anchor="middle" font-weight="600">reviewer</text><text x="455" y="131" text-anchor="middle" font-size="11">paper vs code</text>
+    <path d="M372,108 L398,108" stroke="currentColor" marker-end="url(#arrow)"/>
+    <path d="M398,130 L374,130" stroke="#c47f17" marker-end="url(#arrowc)"/>
+    <text x="385" y="160" text-anchor="middle" font-size="11" fill="#c47f17">blocking → fix</text>
+    <rect x="262" y="190" width="248" height="40" rx="4" fill="none" stroke="currentColor"/>
+    <text x="386" y="215" text-anchor="middle">stage <tspan font-family="IBM Plex Mono, monospace">pilot</tspan> → review passes → <tspan font-family="IBM Plex Mono, monospace">full</tspan></text>
+    <rect x="262" y="250" width="248" height="40" rx="4" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+    <text x="386" y="275" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">repo/arms/&lt;exp&gt;/runs/&lt;arm&gt;/seed&lt;k&gt;.json</text>
+    <text x="386" y="318" text-anchor="middle" font-size="11" opacity="0.8">up to build_rounds = 5 builder turns</text>
+    <text x="386" y="334" text-anchor="middle" font-size="11" opacity="0.8">experiments run in parallel</text>
+    <line x1="170" y1="329" x2="238" y2="250" stroke="currentColor" marker-end="url(#arrow)"/>
+    <line x1="386" y1="146" x2="386" y2="188" stroke="currentColor" opacity="0.5"/>
+    <line x1="386" y1="230" x2="386" y2="248" stroke="currentColor" marker-end="url(#arrow)"/>
+    <!-- gpu -->
+    <rect x="262" y="378" width="248" height="36" rx="4" fill="none" stroke="currentColor"/>
+    <text x="386" y="400" text-anchor="middle" font-size="11">GPU box: one shared queue, one job at a time</text>
+    <line x1="300" y1="146" x2="300" y2="376" stroke="currentColor" stroke-dasharray="2 3" marker-end="url(#arrow)"/>
+    <!-- evaluate -->
+    <rect x="560" y="120" width="140" height="56" rx="4" fill="none" stroke="#1b9aa2" stroke-width="2"/>
+    <text x="630" y="143" text-anchor="middle" font-weight="600">evaluator</text><text x="630" y="160" text-anchor="middle" font-size="11">own code, repo/eval</text>
+    <rect x="560" y="210" width="140" height="56" rx="4" fill="none" stroke="#c47f17" stroke-width="2"/>
+    <text x="630" y="233" text-anchor="middle" font-weight="600">audit per claim</text><text x="630" y="250" text-anchor="middle" font-size="11">independent recompute</text>
+    <line x1="510" y1="270" x2="558" y2="150" stroke="currentColor" marker-end="url(#arrow)"/>
+    <line x1="510" y1="270" x2="558" y2="238" stroke="currentColor" marker-end="url(#arrow)"/>
+    <text x="630" y="292" text-anchor="middle" font-size="11" fill="#c47f17">disagree &gt; 2% → cap</text>
+    <!-- tune -->
+    <rect x="730" y="120" width="130" height="56" rx="4" fill="none" stroke="#1b9aa2" stroke-width="2" stroke-dasharray="6 3"/>
+    <text x="795" y="143" text-anchor="middle" font-weight="600">tuner</text><text x="795" y="160" text-anchor="middle" font-size="11">≤ 4 rounds</text>
+    <path d="M840,176 C840,205 750,205 750,178" fill="none" stroke="#c47f17" marker-end="url(#arrowc)"/>
+    <text x="795" y="220" text-anchor="middle" font-size="11" fill="#c47f17">gap to paper fed back</text>
+    <rect x="730" y="240" width="130" height="40" rx="4" fill="none" stroke="#c47f17" stroke-width="2"/>
+    <text x="795" y="265" text-anchor="middle" font-size="12">audit:&lt;claim&gt;:tuned</text>
+    <line x1="700" y1="148" x2="728" y2="148" stroke="currentColor" marker-end="url(#arrow)"/>
+    <text x="795" y="304" text-anchor="middle" font-size="11" opacity="0.8">only claims that fell short</text>
+    <!-- judge -->
+    <rect x="890" y="120" width="170" height="56" rx="4" fill="none" stroke="currentColor" stroke-width="2"/>
+    <text x="975" y="143" text-anchor="middle" font-weight="600">rule verdicts</text><text x="975" y="160" text-anchor="middle" font-size="11">pure python, 15% tolerance</text>
+    <rect x="890" y="210" width="170" height="56" rx="4" fill="none" stroke="#c47f17" stroke-width="2"/>
+    <text x="975" y="233" text-anchor="middle" font-weight="600">judge</text><text x="975" y="250" text-anchor="middle" font-size="11">final verdict + reason</text>
+    <rect x="890" y="300" width="170" height="56" rx="4" fill="none" stroke="#1b9aa2" stroke-width="2"/>
+    <text x="975" y="323" text-anchor="middle" font-weight="600">reporter + export</text><text x="975" y="340" text-anchor="middle" font-size="11">results/&lt;paper&gt;/</text>
+    <line x1="860" y1="148" x2="888" y2="148" stroke="currentColor" marker-end="url(#arrow)"/>
+    <line x1="975" y1="176" x2="975" y2="208" stroke="currentColor" marker-end="url(#arrow)"/>
+    <line x1="975" y1="266" x2="975" y2="298" stroke="currentColor" marker-end="url(#arrow)"/>
+  </g>
+</svg>
+<figcaption>Teal boxes do the work, amber boxes check it. The dashed arrow from the builder is a GPU job; every run of every paper shares that one queue.</figcaption>
+</figure>
+
+<div class="grid2">
+  <div class="card flow"><h4>What the flow guarantees</h4><ul>
+    <li>Every claimed number is recomputed twice from raw run files, by two different models.</li>
+    <li>Every builder round is reviewed against the paper before the next one.</li>
+    <li>Every final verdict sits next to its rule verdict, so a judge override is visible.</li>
+    <li>Everything an agent did is journaled and replayable.</li>
+  </ul></div>
+  <div class="card gate"><h4>What it no longer enforces (by choice)</h4><ul>
+    <li>Blindness: builders may read the paper and its reported numbers.</li>
+    <li>A GPU-hour limit: <code>gpu_hours</code> is a planning hint only.</li>
+    <li>Procedure rules in prompts: no learning checks, seed rules or leak checks.</li>
+  </ul></div>
+</div>
+</section>
+
+<section id="phases">
+<h2><span class="n">02</span>Phases in detail</h2>
+
+<h3>1 · Lead</h3>
+<p>One session, label <code>lead</code>, on the strong tier, with two turns.</p>
+<ul>
+  <li><b>Turn 1, claims.</b> Lists the arms (every method or baseline) as slugs and extracts the claims the scope asks for. For a paper that proposes a method, its benchmark numbers come first, as <code>value</code> claims. Each claim is a <code>value</code>, an <code>ordering</code> (better arm vs worse arm, with <code>paper_a</code>/<code>paper_b</code>) or a <code>predicate</code> (<code>~=</code> or <code>&gt;=</code> a target). It also records <code>source</code> (table, text or figure) and, for a figure, which panel and curve.</li>
+  <li><b>Checks after turn 1.</b> Non-slug arm names and claim ids are renamed everywhere. A claim with a missing number, unknown arm or a paper number outside its metric's units is sent back; on the last of <code>max_tries</code> it is dropped and the usable claims go on.</li>
+  <li><b>Figure reads</b> (section 05) replace numbers that only exist in a plot.</li>
+  <li><b>Turn 2, experiments.</b> Picks what to reproduce within roughly <code>gpu_hours</code>, defers the rest with a reason, and groups the selected claims into experiments: arms, a short procedure pointing to the paper's sections, seeds, metric names with exact definitions, the metric each claim uses, and what a reviewer should check. Unknown claim ids and repeats are dropped and unaddressed claims deferred, then the structure is checked (arms exist, compared arms run, metrics defined).</li>
+</ul>
+
+<h3>2 · Build</h3>
+<p>One builder session per experiment, label <code>builder:&lt;experiment&gt;</code>, strong tier, all experiments in parallel. Each round is one builder turn followed by one fresh reviewer call (<code>reviewer:&lt;experiment&gt;</code>, cheap tier).</p>
+<ol>
+  <li>Builder reads the paper, implements the experiment in <code>repo/arms/&lt;experiment&gt;/</code>, runs a short pilot on the GPU and reports stage <code>pilot</code> with its run files.</li>
+  <li>Reviewer reads the paper, the code and the run files and returns issues, each marked blocking or not.</li>
+  <li>Blocking issues go back to the builder at the same stage. A clean pilot review sends the builder on to the full runs (stage <code>full</code>); a clean full review ends the build.</li>
+  <li>The loop stops after <code>build_rounds</code> builder turns (default 5). An open review caps the experiment at <span class="pill cap">partial</span>; full runs that never finished cap it at <span class="pill cap">could_not_test</span>.</li>
+</ol>
+
+<h3>3 · Evaluate</h3>
+<p>The <code>evaluator</code> (strong) writes its own code in <code>repo/eval/</code> and computes every claim from the raw run files, as the paper defines the metric. It gets two tries to cover every claim. Then one <code>audit:&lt;claim&gt;</code> agent per claim (cheap, read-only shell) recomputes it independently with a python heredoc. If the two disagree by more than 2% on a value or an arm mean, the claim is capped at <span class="pill cap">partial</span>; a paired difference only counts when the auditor's agrees.</p>
+
+<h3>4 · Tune (optional, <code>tune: true</code>)</h3>
+<p>Claims whose blind result does not match the paper go to one <code>tuner</code> session (strong) that sees the paper's numbers and may change any setting, working in <code>repo/tuned/&lt;experiment&gt;/</code>. Each round it tries up to <code>tune_trials</code> settings, logs them to <code>trials.json</code>, writes the best setting's runs as run files and answers with its numbers. The flow compares them with the paper and feeds the gap back, for up to <code>tune_rounds</code> rounds, stopping early once every claim matches. The best tuned result then gets its own audit (<code>audit:&lt;claim&gt;:tuned</code>). The target is the method's own number: an ordering only counts as a tuned match if the method arm is within tolerance of <code>paper_a</code>.</p>
+
+<h3>5 · Judge</h3>
+<p>Pure-python rule verdicts per claim (section 06), with caps applied. Then the <code>judge</code> agent (cheap) reads the paper, the run files, the rows, the caps and the audits, and sets a final verdict with a reason for every claim. It may depart from a rule verdict but must cite a file or number; both verdicts are kept. If it gives no valid answer in <code>max_tries</code>, the rule verdicts stand and a cap says so.</p>
+
+<h3>6 · Report</h3>
+<p>The <code>reporter</code> writes <code>report.md</code> around the verdict table. The flow appends sections it writes itself, so their wording is exact: caps with their open findings, tuning changes per claim, and the paper numbers read off figures. The report states that builders could read the paper's numbers and that results were computed independently.</p>
+</section>
+
+<section id="roles">
+<h2><span class="n">03</span>Roles, models, access</h2>
+<p>Workers run on the strong tier and their checkers on the cheap tier, so a checker is never the same model as the worker it checks. Strong is <code>deepseek/deepseek-v4.1-flash-1017</code>, cheap is <code>z-ai/glm-5.3-flash</code>, both through OpenRouter at reasoning effort low, with a 1M-token context. Access is enforced by the tools, not by the prompt.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Label</th><th>Tier</th><th>Reads</th><th>Writes</th><th>Shell</th><th>GPU</th><th>Call limit</th></tr></thead>
+  <tbody>
+    <tr><td><code>lead</code></td><td><span class="pill strong">strong</span></td><td>paper, scope</td><td>-</td><td class="no">none</td><td class="no">none</td><td>200</td></tr>
+    <tr><td><code>figure:&lt;claim&gt;</code></td><td><span class="pill strong">strong</span></td><td>paper, scope</td><td>-</td><td class="no">none</td><td class="no">none</td><td>25</td></tr>
+    <tr><td><code>figure-check:&lt;claim&gt;</code></td><td><span class="pill cheap">cheap</span></td><td>paper, scope</td><td>-</td><td class="no">none</td><td class="no">none</td><td>25</td></tr>
+    <tr><td><code>builder:&lt;exp&gt;</code></td><td><span class="pill strong">strong</span></td><td>paper, scope, repo/</td><td><code>repo/arms/&lt;exp&gt;</code></td><td>read-write</td><td>submit, wait, download, cancel</td><td>200</td></tr>
+    <tr><td><code>reviewer:&lt;exp&gt;</code></td><td><span class="pill cheap">cheap</span></td><td>paper, scope, repo/</td><td>-</td><td>read-only</td><td>short checks, own jobs</td><td>80</td></tr>
+    <tr><td><code>evaluator</code></td><td><span class="pill strong">strong</span></td><td>paper, scope, repo/</td><td><code>repo/eval</code></td><td>read-write</td><td class="no">none</td><td>200</td></tr>
+    <tr><td><code>audit:&lt;claim&gt;</code></td><td><span class="pill cheap">cheap</span></td><td>paper, scope, repo/</td><td>-</td><td>read-only</td><td class="no">none</td><td>60</td></tr>
+    <tr><td><code>tuner</code></td><td><span class="pill strong">strong</span></td><td>paper, scope, repo/</td><td><code>repo/tuned</code></td><td>read-write</td><td>submit, wait, download, cancel</td><td>200</td></tr>
+    <tr><td><code>judge</code></td><td><span class="pill cheap">cheap</span></td><td>paper, scope, repo/</td><td>-</td><td>read-only</td><td class="no">none</td><td>60</td></tr>
+    <tr><td><code>reporter</code></td><td><span class="pill cheap">cheap</span></td><td>everything</td><td><code>report.md</code></td><td class="no">none</td><td class="no">none</td><td>200</td></tr>
+  </tbody>
+</table></div>
+<p>Every role that can read <code>paper.pdf</code> also gets <code>view_page</code>, which renders a page or a crop of it as an image. The system prompt is short: who is in the team, five rules (cite numbers from files, follow scope.txt, no paper or third-party code, report deviations, submit once) and the role's access line. Per-role guidance was removed on 4 November.</p>
+</section>
+
+<section id="runfiles">
+<h2><span class="n">04</span>Run-file contract</h2>
+<p>The one format the flow fixes, because two agents must compute every claim from it independently. Builders write it under <code>repo/arms/</code>, the tuner under <code>repo/tuned/</code>.</p>
+<pre>repo/arms/&lt;experiment&gt;/runs/&lt;arm&gt;/seed&lt;k&gt;.json
+{
+  "experiment": "fc-tanh-edgestability",
+  "arm": "gd-lr-2over100",
+  "seed": 0,
+  "job_id": "5e6e1f6f-1a79-43c7-83e1-c29bdd22f7da",   // the gpurun job that produced it, or "local"
+  "config": { every hyperparameter the run used },
+  "metrics": { "late_sharpness_over_2overeta": 1.077, "breakeven_iteration": 900, ... },
+  "curves": { "sharpness": [[0, 82.3], [10, 83.0], ...] }
+}
+A run that did not finish has no file.</pre>
+<p>Claims point to a metric name in the experiment's <code>metrics</code> list. The evaluator and auditor fill a fixed answer shape per claim: <code>value</code> for value and predicate claims, or <code>a</code>, <code>b</code> (mean with a 95% CI over seeds) and <code>diff</code> (paired a − b over shared seeds) for an ordering, plus the run files they used in <code>sources</code>.</p>
+</section>
+
+<section id="figures">
+<h2><span class="n">05</span>Reading numbers off figures</h2>
+<p>A PDF's text keeps a plot's tick labels but not its curves, so a number that only exists in a plot used to be guessed (RePPO's Breakout score came out as 0.8, 0.72 and 0.55 in three runs). Now any claim whose <code>source</code> is <code>figure</code>, or that cites a figure without a source, gets two independent readings before the lead writes its experiments.</p>
+<figure>
+<svg viewBox="0 0 1000 200" role="img" aria-label="Two readers on different models look at the rendered figure and report value and uncertainty per field; the flow converts raw-unit uncertainties, averages the readings, widens the claim's tolerance by the uncertainty and keeps the lead's number when nothing usable came back.">
+  <defs><marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, Arial, sans-serif" font-size="12" fill="currentColor">
+    <rect x="10" y="70" width="150" height="56" rx="4" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+    <text x="85" y="94" text-anchor="middle">view_page</text><text x="85" y="111" text-anchor="middle" font-size="11">page or crop, JPEG</text>
+    <rect x="210" y="20" width="170" height="56" rx="4" fill="none" stroke="#1b9aa2" stroke-width="2"/>
+    <text x="295" y="43" text-anchor="middle" font-weight="600">figure:&lt;claim&gt;</text><text x="295" y="60" text-anchor="middle" font-size="11">strong model</text>
+    <rect x="210" y="120" width="170" height="56" rx="4" fill="none" stroke="#c47f17" stroke-width="2"/>
+    <text x="295" y="143" text-anchor="middle" font-weight="600">figure-check:&lt;claim&gt;</text><text x="295" y="160" text-anchor="middle" font-size="11">cheap model</text>
+    <line x1="160" y1="92" x2="208" y2="52" stroke="currentColor" marker-end="url(#arrow2)"/>
+    <line x1="160" y1="104" x2="208" y2="144" stroke="currentColor" marker-end="url(#arrow2)"/>
+    <rect x="440" y="62" width="230" height="72" rx="4" fill="none" stroke="currentColor" stroke-width="2"/>
+    <text x="555" y="86" text-anchor="middle" font-weight="600">combine_reads</text>
+    <text x="555" y="104" text-anchor="middle" font-size="11">mean of readings; unc = max(reported, gap / 2)</text>
+    <text x="555" y="120" text-anchor="middle" font-size="11">raw-unit unc converted; capped at 50%</text>
+    <line x1="380" y1="48" x2="438" y2="88" stroke="currentColor" marker-end="url(#arrow2)"/>
+    <line x1="380" y1="148" x2="438" y2="112" stroke="currentColor" marker-end="url(#arrow2)"/>
+    <rect x="730" y="30" width="250" height="44" rx="4" fill="none" stroke="#1b9aa2" stroke-width="2"/>
+    <text x="855" y="57" text-anchor="middle">paper number = mean</text>
+    <rect x="730" y="122" width="250" height="44" rx="4" fill="none" stroke="#c47f17" stroke-width="2"/>
+    <text x="855" y="149" text-anchor="middle">rel_tol = max(rel_tol, unc / |value|)</text>
+    <line x1="670" y1="88" x2="728" y2="54" stroke="currentColor" marker-end="url(#arrow2)"/>
+    <line x1="670" y1="110" x2="728" y2="142" stroke="currentColor" marker-end="url(#arrow2)"/>
+  </g>
+</svg>
+<figcaption>The readers never see the lead's guess. A reading that fails the unit check is dropped; if nothing usable comes back, the lead's number stays.</figcaption>
+</figure>
+<div class="grid2">
+  <div class="card"><h4>Limits that keep readers on task</h4><ul>
+    <li>At most 6 <code>view_page</code> calls per turn (readers once zoomed 60+ times without answering).</li>
+    <li>25 model calls per figure turn, with the wrap-up warning 15 calls before.</li>
+    <li>Guidance: one whole-page view, then crop to the panel once or twice.</li>
+  </ul></div>
+  <div class="card"><h4>Measured on RePPO Fig. 6a</h4><ul>
+    <li>Both models read RePPO m=1.2 at ~170 raw → 0.68 ± 0.045 normalized.</li>
+    <li>PPO-Q + Ent: ~95–100 raw → 0.39 ± 0.05.</li>
+    <li>10 page views, $0.005 for both readings.</li>
+  </ul></div>
+</div>
+</section>
+
+<section id="verdicts">
+<h2><span class="n">06</span>Verdicts and caps</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Claim kind</th><th>Reproduced</th><th>Partial</th><th>Not reproduced</th></tr></thead>
+  <tbody>
+    <tr><td><code>value</code></td><td>|measured − paper| ≤ tol · |paper|</td><td>within 3 × that</td><td>beyond 3 ×</td></tr>
+    <tr><td><code>predicate &gt;=</code></td><td>measured ≥ target</td><td>short by ≤ tol · |target|</td><td>further short</td></tr>
+    <tr><td><code>ordering</code>, audited paired CI</td><td>CI of a − b above 0</td><td>CI spans 0, mean &gt; 0</td><td>CI below 0, or mean ≤ 0</td></tr>
+    <tr><td><code>ordering</code>, no paired CI</td><td>CIs separated, a above</td><td>overlap, mean a above</td><td>separated the other way, or mean below</td></tr>
+    <tr><td>tuned result</td><td colspan="3">as above, and for an ordering the method arm must also match <code>paper_a</code> within tol</td></tr>
+  </tbody>
+</table></div>
+<p><b>Tolerance.</b> <code>tol = max(claim rel_tol, 0.15)</code>. A figure reading can only widen it. Higher-is-better is per claim; for lower-is-better orderings the comparison is mirrored.</p>
+<h3>Caps (a claim's verdict can be no higher than)</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>Cause</th><th>Ceiling</th><th>Scope</th></tr></thead>
+  <tbody>
+    <tr><td>Full runs never finished within <code>build_rounds</code></td><td><span class="pill cap">could_not_test</span></td><td>the experiment's claims</td></tr>
+    <tr><td>Reviewer still had blocking issues after the last round</td><td><span class="pill cap">partial</span></td><td>the experiment's claims; findings listed in the report</td></tr>
+    <tr><td>Evaluator and auditor disagree by more than 2%</td><td><span class="pill cap">partial</span></td><td>that claim</td></tr>
+    <tr><td><code>smoke: true</code></td><td><span class="pill cap">partial</span></td><td>every claim</td></tr>
+    <tr><td>Judge gave no valid answer</td><td>rule verdicts stand</td><td>every claim</td></tr>
+  </tbody>
+</table></div>
+<p><b>Paper verdict.</b> Reproduced only if every claim is; partial if any is reproduced or partial; otherwise not reproduced (or could not test if nothing could be tested). The table shows rule verdict and final verdict side by side, a <code>(tuned)</code> marker, and a scale column (measured / paper per compared arm) so a setup gap that moves both arms is visible.</p>
+</section>
+
+<section id="gates">
+<h2><span class="n">07</span>Every hard-coded gate</h2>
+<p>What still stops, retries, repairs or caps automatically. Everything else is left to the agents and the reviewer.</p>
+<div class="grid2">
+  <div class="card gate"><h4>Flow: structure</h4><ul>
+    <li>Arm names and claim ids must be slugs: <b>renamed</b>, not sent back.</li>
+    <li>Claim fields (value has a number, predicate has op and target, ordering has two listed arms): <b>retried</b>, dropped on the last try.</li>
+    <li>Unit check: a normalized, fraction, probability or proportion metric may not have a paper number above 1.5: <b>retried</b>.</li>
+    <li>Selection: unknown ids and repeats <b>dropped</b>, unaddressed claims <b>deferred</b>, cut to <code>max_claims</code>.</li>
+    <li>Experiment: slug id, arms from the list, compared arms run, metrics defined: <b>retried</b>.</li>
+    <li>No usable claims, no valid experiments, or no experiment finished: <b>run stops</b> (could_not_test).</li>
+  </ul></div>
+  <div class="card gate"><h4>Flow: results</h4><ul>
+    <li>Review open after the last round: cap partial.</li>
+    <li>Full runs never finished: cap could_not_test.</li>
+    <li>Evaluator vs audit more than 2% apart: cap partial; paired CI ignored unless the auditor's agrees.</li>
+    <li>Rule verdicts with the 15% tolerance; judge must give one verdict per claim (retried).</li>
+    <li>Smoke run: cap partial.</li>
+  </ul></div>
+  <div class="card gate"><h4>Agent loop</h4><ul>
+    <li>5 invalid submits or bare replies end a turn (it is skipped).</li>
+    <li>200 model calls per turn (80 reviewer, 60 audit and judge, 25 figure readers); wrap-up warning 15 before.</li>
+    <li>Answers validated against a JSON schema; extra fields dropped; broken brackets repaired only if the result validates.</li>
+    <li>6 page views per turn.</li>
+    <li>USD limit per run (<code>--usd</code>), optional token limit.</li>
+  </ul></div>
+  <div class="card gate"><h4>Tools and GPU</h4><ul>
+    <li>Role access table (reads, writes, shell, GPU) enforced in <code>tools.py</code>.</li>
+    <li>Shell in bubblewrap, no network, empty environment, 1,800 s per command.</li>
+    <li>Uploads ≤ 500 MB; submit timeout 600 s + 10 s per MB.</li>
+    <li>Jobs that only inspect or install are refused.</li>
+    <li>30 jobs per role per run; <code>gpu_wait</code> ≤ 1,800 s.</li>
+    <li>Agents see and cancel only their own run's jobs.</li>
+  </ul></div>
+</div>
+</section>
+
+<section id="agentloop">
+<h2><span class="n">08</span>The agent loop</h2>
+<p>Each agent is a tool-calling loop over the OpenRouter chat API (<code>framework/agents.py</code>). The model gets the role's tools plus <code>submit</code>; a turn ends when a submit validates.</p>
+<div class="grid2">
+  <div class="card"><h4>Answers</h4><ul>
+    <li><code>submit.result</code> is declared as a JSON object, so models do not hand-escape a 30 KB document into a string.</li>
+    <li>A string still parses, with raw newlines allowed; a bracket-rebalancing repair handles dropped item braces, stray closers and trailing commas.</li>
+    <li>A schema rejection lists up to 6 errors at once.</li>
+    <li>Every rejected submit is saved to <code>runs/&lt;id&gt;/rejected/&lt;label&gt;.&lt;n&gt;.txt</code>.</li>
+  </ul></div>
+  <div class="card"><h4>Sessions</h4><ul>
+    <li>Multi-turn roles are sessions whose turns are labelled <code>base</code>, <code>base#2</code>, …</li>
+    <li>A skipped turn leaves nothing in the session, so until one turn has answered, a retry carries the original request too.</li>
+    <li>Near 85% of the context window, old tool output is shrunk; paper reads stay whole.</li>
+  </ul></div>
+  <div class="card"><h4>Images</h4><ul>
+    <li><code>view_page</code> renders with pdfium at 2×, crops, enlarges small crops to 1,200 px, encodes JPEG.</li>
+    <li>Images follow the step's tool results as one user message with image parts.</li>
+    <li>All pdfium calls share one lock: concurrent renders crashed whole runs with no traceback.</li>
+  </ul></div>
+</div>
+</section>
+
+<section id="sandbox">
+<h2><span class="n">09</span>Sandbox and GPU</h2>
+<p>Agents run on the laptop (WSL). Their shell is a bubblewrap sandbox with only their readable paths mounted (read-only, plus their writable directory), no network, no inherited environment, and a CPU Python with numpy, scipy, pandas, torch and jax for small checks.</p>
+<p>GPU work goes through <code>gpurun</code> tools that the framework runs outside the sandbox, over ssh to the <code>gpu_runner</code> daemon on the GPU box (1× A100 40 GB per job). A submit tars one readable directory (no <code>.git</code>, <code>.venv</code> or caches), the daemon runs the commands in order inside it, and <code>gpu_download</code> copies results back into a writable directory. The GPU box has network and a shared <code>uv</code> cache, so jobs install from <code>pyproject.toml</code> and download data themselves.</p>
+<div class="note"><b>The queue is the bottleneck.</b> The daemon runs one job at a time across every run and every user. Three papers in parallel overlap their agent work, but their GPU jobs still go one after another.</div>
+<p><b>GPU-hour ledger.</b> Each run records when it first saw a job running and finished. Because the daemon reports no times, a job that ran while the laptop slept was charged the whole night (17 and 34 "GPU-hours"). The limit is therefore off (<code>enforce_budget = false</code>); the ledger is kept for information.</p>
+</section>
+
+<section id="durability">
+<h2><span class="n">10</span>Journal, resume, pause</h2>
+<div class="grid2">
+  <div class="card flow"><h4>Journal and resume</h4><p>Every agent call is journaled in <code>runs/&lt;id&gt;/journal.jsonl</code> with a signature over its prompt, label, phase, model, schema and (for sessions) prior turns. <code>--resume runs/&lt;id&gt;</code> replays every call whose signature still matches, at no cost, and reruns from the first that does not. Editing a prompt therefore reruns everything after it; pure-python changes replay cleanly.</p></div>
+  <div class="card flow"><h4>Stopping cleanly</h4><p>On SIGTERM or SIGINT a run cancels its own GPU jobs before exiting, and it cancels leftovers on normal exit too. <code>./pause_runs.sh</code> freezes every live run (SIGSTOP to its process group) for offline periods; <code>./unpause_runs.sh</code> continues them. GPU jobs keep running meanwhile.</p></div>
+</div>
+<pre>./launch.sh &lt;paper&gt; --usd 50                          # new run, detached, log in logs/
+./launch.sh &lt;paper&gt; --resume runs/&lt;id&gt; --usd 50       # continue from the journal
+./pause_runs.sh   /   ./unpause_runs.sh                # before and after going offline</pre>
+</section>
+
+<section id="config">
+<h2><span class="n">11</span>Arguments and config</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Argument (args/&lt;paper&gt;.json)</th><th>Current</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>paper</code></td><td class="mono">../paper-reproducer/dataset/…</td><td>directory with <code>paper.pdf</code> and <code>scope.txt</code></td></tr>
+    <tr><td><code>compute</code></td><td class="mono">remote</td><td>GPU box via gpurun, or <code>local</code> (sandboxed CPU only)</td></tr>
+    <tr><td><code>gpu_hours</code></td><td class="mono">6</td><td>planning hint for the lead; not enforced</td></tr>
+    <tr><td><code>max_tries</code></td><td class="mono">3</td><td>lead claim turns, lead experiment turns, judge turns</td></tr>
+    <tr><td><code>build_rounds</code></td><td class="mono">5</td><td>builder turns per experiment, each followed by a review</td></tr>
+    <tr><td><code>tune</code>, <code>tune_rounds</code>, <code>tune_trials</code></td><td class="mono">true, 4, 4</td><td>tuning on, rounds, settings per round</td></tr>
+    <tr><td><code>max_claims</code>, <code>smoke</code></td><td class="mono">null, false</td><td>selection limit; cheap end-to-end check capped at partial</td></tr>
+  </tbody>
+</table></div>
+<p><code>config.toml</code> holds the two model tiers, per-role call limits (<code>reviewer 80</code>, <code>figure 25</code>, <code>figure-check 25</code>, <code>audit 60</code>, <code>judge 60</code>, default 200), the shell timeout (1,800 s), the read limit (1M characters) and the gpurun connection.</p>
+</section>
+
+<section id="outputs">
+<h2><span class="n">12</span>Outputs</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Where</th><th>What</th></tr></thead>
+  <tbody>
+    <tr><td><code>runs/&lt;time&gt;-&lt;paper&gt;/</code></td><td>workspace (<code>work/</code>), journal, events, GPU job list and times, rejected submits, <code>result.json</code></td></tr>
+    <tr><td><code>logs/&lt;paper&gt;-&lt;time&gt;.log</code></td><td>phases, agent starts and ends, every tool call, flow logs</td></tr>
+    <tr><td><code>results/&lt;paper&gt;/REPORT.md</code></td><td>reporter's report plus the flow's caps, tuning and figure sections</td></tr>
+    <tr><td><code>results/&lt;paper&gt;/VERIFICATION.md</code></td><td>verdict table, every audit and tuned audit, review state per experiment, caps, deferred claims, every GPU job id</td></tr>
+    <tr><td><code>results/&lt;paper&gt;/{arms,eval,tuned}/</code></td><td>the code and run files behind every number</td></tr>
+  </tbody>
+</table></div>
+</section>
+
+<section id="history">
+<h2><span class="n">13</span>How it got here</h2>
+<p>Each step was a response to something a live run did.</p>
+<ul class="timeline">
+  <li><span class="d">2 Nov</span>Thirteen roles: reader, spec, expert, planner, contracts, contracts-check, builder, challenger, gate, audit, tuner, judge, reporter, with a job graph, arm families and a leak check on specs.</li>
+  <li><span class="d">2–3 Nov</span>GLM broke large spec answers it had to escape into a string: <code>submit</code> takes an object, brackets are repaired, rejected answers are saved.</li>
+  <li><span class="d">3 Nov</span>Checks repair instead of reject (renames, selection repair); GPU job cap raised to 30; upload timeout scales with size; tolerance raised from 5% to 15%.</li>
+  <li><span class="d">3 Nov</span>A RePPO run whose arms played randomly passed every review: tuning now targets the method's own number, and the lead puts benchmark numbers first.</li>
+  <li><span class="d">3 Nov</span>Simplified to lead → builder ↔ reviewer → evaluator + audit → tuner → judge. Planner, contracts, expert, protocol risks and the leak check removed.</li>
+  <li><span class="d">3 Nov</span>Figure reading with two models and <code>view_page</code>; unit check on paper numbers; raw-unit uncertainties converted.</li>
+  <li><span class="d">4 Nov</span>GPU-hour limit off after a sleeping laptop charged a night of phantom time.</li>
+  <li><span class="d">4 Nov</span>Open-ended prompts: every role may read the paper; learning, seed and procedure rules removed; pdfium lock after concurrent renders crashed two runs.</li>
+</ul>
+</section>
+
+<section id="open">
+<h2><span class="n">14</span>Known gaps</h2>
+<div class="grid2">
+  <div class="card gate"><h4>RePPO's Q-critic arms</h4><p>In the last build, every arm with a Q critic stayed at random level, including plain PPO-Q, while the V-critic arms learned. That builder bootstrapped the Q critic's λ-return with max over actions, marked "assumed"; the one implementation that learned used the on-policy Q(s′, a′). The current run tests whether builders that can read Algorithm 1 get it right.</p></div>
+  <div class="card gate"><h4>One GPU queue</h4><p>Parallel papers wait on each other's jobs. A second runner or per-run queues would cut wall time more than any flow change.</p></div>
+  <div class="card gate"><h4>GPU-hour ledger</h4><p>Wrong after any sleep or pause. A real fix needs job start and end times from <code>gpu_runner</code>.</p></div>
+  <div class="card gate"><h4>Network on the GPU box</h4><p>Jobs can clone any repository. Builders so far took only official baselines and recorded their source; a hard block needs bubblewrap on the GPU box and a setup-only network phase.</p></div>
+  <div class="card gate"><h4>Laptop orchestration</h4><p>Runs live on the laptop. Pausing before going offline works; moving orchestration to an always-on machine would remove the problem.</p></div>
+  <div class="card gate"><h4>Not blind</h4><p>Builders can see target numbers. The safeguard is the independent recompute from run files that carry their GPU job id, not ignorance of the target.</p></div>
+</div>
+</section>
+
+</div>
+</body>
+</html>

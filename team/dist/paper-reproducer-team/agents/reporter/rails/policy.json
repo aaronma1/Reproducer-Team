@@ -1,0 +1,12 @@
+{
+  "role": "reporter",
+  "read": [
+    ""
+  ],
+  "write": [
+    "report.md"
+  ],
+  "shell": null,
+  "gpu": null,
+  "web": false
+}

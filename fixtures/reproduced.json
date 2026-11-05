@@ -1,0 +1,230 @@
+{
+ "lead": {
+  "arms": [
+   {
+    "name": "m",
+    "description": "the proposed method"
+   },
+   {
+    "name": "b",
+    "description": "the baseline"
+   }
+  ],
+  "claims": [
+   {
+    "id": "c1",
+    "text": "m reaches 0.5 accuracy",
+    "kind": "value",
+    "metric": "final accuracy",
+    "paper_value": 0.5,
+    "op": null,
+    "target": null,
+    "higher_is_better": true,
+    "better": null,
+    "worse": null,
+    "anchors": [
+     "Table 1"
+    ],
+    "source": "table"
+   },
+   {
+    "id": "c2",
+    "text": "m beats b",
+    "kind": "ordering",
+    "metric": "final accuracy",
+    "paper_value": null,
+    "op": null,
+    "target": null,
+    "higher_is_better": true,
+    "better": "m",
+    "worse": "b",
+    "anchors": [
+     "Fig. 2"
+    ],
+    "paper_a": 0.5,
+    "paper_b": 0.3,
+    "source": "table"
+   }
+  ]
+ },
+ "lead#2": {
+  "experiments": [
+   {
+    "id": "main",
+    "arms": [
+     {
+      "name": "m",
+      "description": "method"
+     },
+     {
+      "name": "b",
+      "description": "baseline"
+     }
+    ],
+    "procedure": "Train each arm for 30 epochs with Adam lr 1e-3, batch 128, seeds 0..4, logging accuracy every epoch (Sec. 3).",
+    "seeds": 5,
+    "seeds_reason": "Sec. 3 uses 5 seeds",
+    "metrics": [
+     {
+      "name": "acc",
+      "definition": "test accuracy after the last epoch"
+     }
+    ],
+    "claims": [
+     {
+      "claim_id": "c1",
+      "metric": "acc"
+     },
+     {
+      "claim_id": "c2",
+      "metric": "acc"
+     }
+    ],
+    "acceptance": [
+     "5 run files per arm, seeds 0..4"
+    ]
+   }
+  ],
+  "deferred": []
+ },
+ "builder:main": {
+  "stage": "pilot",
+  "job_ids": [
+   "j1"
+  ],
+  "run_files": [
+   "repo/arms/main/runs/m/seed0.json"
+  ],
+  "notes": "pilot learns",
+  "choices": [
+   {
+    "choice": "weight init",
+    "value": "he",
+    "source": "guess",
+    "where": "train.py:10"
+   }
+  ],
+  "limits": [
+   {
+    "name": "max_epochs",
+    "value": "100",
+    "stated_by_paper": true,
+    "bound_fraction": null,
+    "evidence": "Sec. 4"
+   }
+  ],
+  "changes": []
+ },
+ "reviewer:main": {
+  "issues": []
+ },
+ "builder:main#2": {
+  "stage": "full",
+  "job_ids": [
+   "j2"
+  ],
+  "run_files": [
+   "repo/arms/main/runs/m/seed0.json"
+  ],
+  "notes": "done",
+  "choices": [
+   {
+    "choice": "weight init",
+    "value": "he",
+    "source": "guess",
+    "where": "train.py:10"
+   }
+  ],
+  "limits": [
+   {
+    "name": "max_epochs",
+    "value": "100",
+    "stated_by_paper": true,
+    "bound_fraction": null,
+    "evidence": "Sec. 4"
+   }
+  ],
+  "changes": []
+ },
+ "reviewer:main#2": {
+  "issues": [
+   {
+    "issue": "a log line is noisy",
+    "evidence": "train.py:3",
+    "action": "quiet it",
+    "blocking": false
+   }
+  ]
+ },
+ "evaluator": {
+  "results": [
+   {
+    "claim_id": "c1",
+    "value": 0.51,
+    "a": null,
+    "b": null,
+    "diff": null,
+    "sources": [
+     "repo/arms/main/runs/m/seed0.json"
+    ]
+   },
+   {
+    "claim_id": "c2",
+    "value": null,
+    "a": {
+     "mean": 0.51,
+     "lo": 0.49,
+     "hi": 0.53
+    },
+    "b": {
+     "mean": 0.3,
+     "lo": 0.28,
+     "hi": 0.32
+    },
+    "diff": {
+     "mean": 0.21,
+     "lo": 0.18,
+     "hi": 0.24
+    },
+    "sources": [
+     "repo/arms/main/runs/b/seed0.json"
+    ]
+   }
+  ]
+ },
+ "audit:c1": {
+  "claim_id": "c1",
+  "value": 0.51,
+  "a": null,
+  "b": null,
+  "diff": null,
+  "sources": [
+   "x"
+  ],
+  "notes": ""
+ },
+ "audit:c2": {
+  "claim_id": "c2",
+  "value": null,
+  "a": {
+   "mean": 0.51,
+   "lo": 0.49,
+   "hi": 0.53
+  },
+  "b": {
+   "mean": 0.3,
+   "lo": 0.28,
+   "hi": 0.32
+  },
+  "diff": {
+   "mean": 0.21,
+   "lo": 0.18,
+   "hi": 0.24
+  },
+  "sources": [
+   "x"
+  ],
+  "notes": ""
+ },
+ "reporter": "report written"
+}

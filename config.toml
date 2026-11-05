@@ -1,0 +1,38 @@
+# Model tiers. The flow only knows "cheap" and "strong"; ids are OpenRouter model ids.
+# Limits are loose on purpose: the JiuwenSwarm cluster runs of these models used 80-180k tokens per
+# call with ~96% prompt-cache hits. Spend is capped per run in dollars (`--usd`), not by tight limits.
+papers_dir = "../paper-reproducer/papers"   # relative to this file; <papers_dir>/<paper>/{paper.pdf,scope.txt}
+tool_timeout_s = 1800      # one shell command (use --shell-timeout for smoke runs)
+tool_output_limit = 100000 # characters kept from a shell/grep/list result
+read_limit = 1000000       # characters returned by read_file (whole files)
+max_steps = 200            # model calls per turn before giving up
+turn_token_limit = 0       # 0 = no per-turn cap
+sandbox_venv = ""          # agents' shell python; "" = this project's .venv (has CPU torch/jax/scipy/pandas installed for tiny checks)
+default_tier = "cheap"
+
+# Reviewers check against the spec and the files named to them; they do not need builder-sized budgets.
+# Their last call can only submit, so a review that runs out still returns its findings.
+[role_max_steps]
+reviewer = 80
+figure = 25
+figure-check = 25
+audit = 60
+judge = 60
+
+[tiers.cheap]
+id = "z-ai/glm-5.3-flash"
+effort = "low"
+context = 1048576          # tokens; old tool output is compacted only near this
+
+[tiers.strong]
+id = "deepseek/deepseek-v4.1-flash-1017"
+effort = "low"
+context = 1048576
+
+# gpu_runner daemon (../gpu_runner) on the GPU box, reached with `ssh <ssh_host>`; used when args.compute = "remote".
+[gpu]
+ssh_host = "gpu"
+python = "/home/a84456917/Projects/gpu_runner/.venv/bin/python"
+runner = "/home/a84456917/Projects/gpu_runner/gpu_runner.py"
+hardware = "1x A100-PCIE-40GB (one GPU per job; the box has 56 CPU cores)"
+max_wait_s = 1800

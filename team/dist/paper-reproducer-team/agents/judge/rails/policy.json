@@ -1,0 +1,12 @@
+{
+  "role": "judge",
+  "read": [
+    "paper.pdf",
+    "scope.txt",
+    "repo"
+  ],
+  "write": [],
+  "shell": "ro",
+  "gpu": null,
+  "web": false
+}

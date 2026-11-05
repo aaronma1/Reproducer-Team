@@ -1,0 +1,24 @@
+{
+  "package_type": "agent_template",
+  "name": "reviewer",
+  "display_name": {
+    "en": "Reviewer",
+    "zh": "审查员"
+  },
+  "description": "Checks each builder round against the paper and lists what must change.",
+  "persona": {
+    "dir": "persona"
+  },
+  "tools": [
+    {
+      "file": "tools/view_page.py",
+      "class": "ViewPage"
+    }
+  ],
+  "rails": [
+    {
+      "file": "rails/policy_rail.py",
+      "class": "RunPolicyRail"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"paper": "papers/double-q-learning-roulette", "compute": "local", "gpu_hours": 2, "max_spec_tries": 3, "max_plan_tries": 3, "max_rounds": 2}

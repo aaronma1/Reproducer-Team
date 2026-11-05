@@ -1,0 +1,14 @@
+{
+  "role": "evaluator",
+  "read": [
+    "paper.pdf",
+    "scope.txt",
+    "repo"
+  ],
+  "write": [
+    "repo/eval"
+  ],
+  "shell": "rw",
+  "gpu": null,
+  "web": false
+}

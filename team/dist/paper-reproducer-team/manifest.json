@@ -1,0 +1,26 @@
+{
+  "package_type": "agent_group",
+  "name": "paper-reproducer-team",
+  "display_name": {
+    "en": "Paper Reproduction Team",
+    "zh": "论文复现专家团"
+  },
+  "description": "Reproduces an ML paper's claims from scratch: one expert per pipeline role, each limited to the files, shell, GPU and web access its role needs.",
+  "instruction": "Run the paper-reproducer skill with experts=true. The leader stages the paper and launches the workflow; the script hands each step to the member of the same name.",
+  "agents": [
+    "leader",
+    "lead",
+    "figure",
+    "figure-check",
+    "builder",
+    "reviewer",
+    "evaluator",
+    "audit",
+    "tuner",
+    "judge",
+    "reporter"
+  ],
+  "skills": [
+    "paper-reproducer"
+  ]
+}

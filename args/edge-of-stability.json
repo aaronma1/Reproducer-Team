@@ -1,0 +1,1 @@
+{"paper": "../paper-reproducer/dataset/edge-of-stability", "compute": "remote", "gpu_hours": 6, "tune": true, "max_tries": 3, "build_rounds": 5, "tune_rounds": 4, "tune_trials": 4}

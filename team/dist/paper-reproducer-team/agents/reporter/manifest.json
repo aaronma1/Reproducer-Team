@@ -1,0 +1,24 @@
+{
+  "package_type": "agent_template",
+  "name": "reporter",
+  "display_name": {
+    "en": "Reporter",
+    "zh": "报告员"
+  },
+  "description": "Writes report.md from the verdict table, caps and run files.",
+  "persona": {
+    "dir": "persona"
+  },
+  "tools": [
+    {
+      "file": "tools/view_page.py",
+      "class": "ViewPage"
+    }
+  ],
+  "rails": [
+    {
+      "file": "rails/policy_rail.py",
+      "class": "RunPolicyRail"
+    }
+  ]
+}

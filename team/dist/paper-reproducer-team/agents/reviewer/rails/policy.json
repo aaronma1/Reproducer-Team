@@ -1,0 +1,12 @@
+{
+  "role": "reviewer",
+  "read": [
+    "paper.pdf",
+    "scope.txt",
+    "repo"
+  ],
+  "write": [],
+  "shell": "ro",
+  "gpu": "run",
+  "web": true
+}

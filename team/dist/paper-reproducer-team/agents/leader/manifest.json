@@ -1,0 +1,12 @@
+{
+  "package_type": "agent_template",
+  "name": "leader",
+  "display_name": {
+    "en": "Reproduction Leader",
+    "zh": "复现团长"
+  },
+  "description": "Stages a paper into a run directory and launches the paper-reproducer workflow; does no reproduction work itself.",
+  "persona": {
+    "dir": "persona"
+  }
+}

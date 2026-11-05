@@ -1,0 +1,24 @@
+{
+  "package_type": "agent_template",
+  "name": "tuner",
+  "display_name": {
+    "en": "Tuner",
+    "zh": "调参员"
+  },
+  "description": "Tunes settings in repo/tuned/ towards the paper's numbers, reporting every change.",
+  "persona": {
+    "dir": "persona"
+  },
+  "tools": [
+    {
+      "file": "tools/view_page.py",
+      "class": "ViewPage"
+    }
+  ],
+  "rails": [
+    {
+      "file": "rails/policy_rail.py",
+      "class": "RunPolicyRail"
+    }
+  ]
+}

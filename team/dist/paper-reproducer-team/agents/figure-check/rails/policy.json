@@ -1,0 +1,11 @@
+{
+  "role": "figure-check",
+  "read": [
+    "paper.pdf",
+    "scope.txt"
+  ],
+  "write": [],
+  "shell": null,
+  "gpu": null,
+  "web": false
+}

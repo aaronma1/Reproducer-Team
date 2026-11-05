@@ -1,0 +1,24 @@
+{
+  "package_type": "agent_template",
+  "name": "figure-check",
+  "display_name": {
+    "en": "Figure Checker",
+    "zh": "复核读图员"
+  },
+  "description": "Second, independent reading of the same figure on the other model tier.",
+  "persona": {
+    "dir": "persona"
+  },
+  "tools": [
+    {
+      "file": "tools/view_page.py",
+      "class": "ViewPage"
+    }
+  ],
+  "rails": [
+    {
+      "file": "rails/policy_rail.py",
+      "class": "RunPolicyRail"
+    }
+  ]
+}

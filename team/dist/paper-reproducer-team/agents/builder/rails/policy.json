@@ -1,0 +1,14 @@
+{
+  "role": "builder",
+  "read": [
+    "paper.pdf",
+    "scope.txt",
+    "repo"
+  ],
+  "write": [
+    "repo/arms/{experiment}"
+  ],
+  "shell": "rw",
+  "gpu": "rw",
+  "web": true
+}
