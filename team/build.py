@@ -1,11 +1,13 @@
 """Build the paper-reproducer-team expert team (AgentGroup) package from team/ sources.
 
-    python team/build.py [--out team/dist] [--zip]
+    python team/build.py [--out team/dist] [--no-zip]
 
-Writes <out>/paper-reproducer-team/: the group manifest, one expert per role in team/roles.json (persona, the
-RunPolicyRail with that role's policy.json, the view_page tool), and the group-shared paper-reproducer skill with
-flows/reproducer_flow.py as its scripts/workflow.py. Every member gets its own copy of the shared files because a
-package may not contain symlinks. Then it checks the result against the rules JiuwenSwarm's publish step applies.
+Writes <out>/paper-reproducer-team/ and <out>/paper-reproducer-team.zip (the file to import or share): the group
+manifest, one expert per role in team/roles.json (persona, the RunPolicyRail with that role's policy.json, the
+view_page tool), and the group-shared paper-reproducer skill with flows/reproducer_flow.py as its
+scripts/workflow.py. Every member gets its own copy of the shared files because a package may not contain symlinks.
+Then it checks the result against the rules JiuwenSwarm's publish step applies and zips it, with the package
+directory as the archive's single top-level entry.
 """
 from __future__ import annotations
 
@@ -70,6 +72,13 @@ def build(out: Path) -> Path:
     return pkg
 
 
+def make_zip(pkg: Path) -> Path:
+    """Zip the package as <out>/<name>.zip, replacing any older archive."""
+    archive = pkg.with_suffix(".zip")
+    archive.unlink(missing_ok=True)
+    return Path(shutil.make_archive(str(pkg), "zip", pkg.parent, pkg.name))
+
+
 def check(pkg: Path) -> None:
     """The structural rules of JiuwenSwarm's agent_group publish adapter (asset_publish_adapters._agent_group)."""
     group = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
@@ -99,12 +108,15 @@ def check(pkg: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", type=Path, default=HERE / "dist")
-    ap.add_argument("--zip", action="store_true", help="also write <out>/paper-reproducer-team.zip")
+    ap.add_argument("--no-zip", dest="zip", action="store_false",
+                    help="skip writing <out>/paper-reproducer-team.zip")
+    ap.add_argument("--zip", action="store_true", help=argparse.SUPPRESS)  # the default; kept for old commands
+    ap.set_defaults(zip=True)
     a = ap.parse_args()
     pkg = build(a.out)
     print(pkg)
     if a.zip:
-        print(shutil.make_archive(str(a.out / NAME), "zip", a.out, NAME))
+        print(make_zip(pkg))
 
 
 if __name__ == "__main__":
