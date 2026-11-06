@@ -37,7 +37,8 @@ Constraints the code follows, and the current design in brief. The full descript
   evaluator/audit agreement cap, rule verdicts at a 15% tolerance floor, and the judge's answer format.
 - No GPU-hour limit (`GpuConfig.enforce_budget = False`); 30 GPU jobs per role per run.
 - The builder submits and ends its turn (`stage: submitted`); the flow waits for the job with a cheap `watch`
-  role and wakes the same session with the tail, so a queue wait costs cheap calls, not a long builder turn.
+  role (backoff 60 s -> 1800 s inside a 3 h budget per job) and wakes the same session with the tail, so a queue wait
+  costs cheap calls, not a long builder turn.
 - A limit the paper does not state that binds past its tolerance is a scope decision owned by `spec` (guard
   limits are tolerated to 10%); the lead's acceptance is recorded and stops it blocking. A stopped run still
   writes `report.md` with its open findings.

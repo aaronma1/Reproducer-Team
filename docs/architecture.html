@@ -378,7 +378,7 @@ A run that did not finish has no file.</pre>
     <li>No usable claims, no valid experiments, or no experiment finished: <b>run stops</b> (could_not_test).</li>
   </ul></div>
   <div class="card gate"><h4>Flow: build answers</h4><ul>
-    <li>A build answer with stage <code>submitted</code>: the flow waits with a cheap <code>watch</code> turn (<code>gpu_wait</code> ≤ 1800 s, <code>job_waits</code> 6) and wakes the builder with the tail — a submission costs no review round; job ids go to <code>jobs.json</code>.</li>
+    <li>A build answer with stage <code>submitted</code>: the flow waits with a cheap <code>watch</code> turn (exponential backoff 60 s → 1800 s, 3 h per job) and wakes the builder with the tail — a submission costs no review round; job ids go to <code>jobs.json</code>.</li>
     <li>No run files reported, or a reported <code>.json</code> that is missing or does not parse: <b>sent back</b> (skipped when the flow cannot see the run root).</li>
     <li>A builder's blocking <code>questions</code>: one lead <code>confer</code> turn answers them, at most <code>max_questions</code> (2) per experiment.</li>
     <li>A review issue with <code>owner: "spec"</code>: the same turn answers it and may patch <code>acceptance</code>, <code>procedure</code>, <code>arms</code> or <code>open_choices</code>; the round is <b>not</b> spent, up to <code>max_spec_fixes</code> (2).</li>

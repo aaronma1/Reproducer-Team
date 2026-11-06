@@ -435,3 +435,10 @@ ssh downloads hung with no keepalive; gpu.py now sets ServerAliveInterval.
   experiments now go into the judge prompt, with the rule that a decision can justify `could_not_test` when the
   protocol cannot identify a claim and never turns a failed measurement into `reproduced`. Seen live: the lead ruled
   four level claims untestable (a paper-side inconsistency) while the run was building.
+
+- The watcher backs off (2026-11-07): `wait_for_jobs` waited a fixed `job_wait_s` per call, which is wrong at both
+  ends - a job that dies in the first minute was noticed 30 minutes later, and a long queue was checked at the same
+  cadence as a short one. It now starts at `job_wait_start_s` (60 s) and doubles to `job_wait_s` (1800 s) inside
+  `job_budget_s` (3 h per job): 60, 120, 240, 480, 960, 1800, 1800 ... so a crash is reported within a minute or two
+  and a two-hour queue costs about a dozen cheap checks instead of fifty short polls. The elapsed time is summed from
+  the waits the flow asked for, not read from a clock (the engine lints `time.monotonic` for resume determinism).

@@ -28,7 +28,7 @@ does not use up a `build_rounds` round.
 
 args (JSON): `{"root": "<run dir>", "compute": "auto", "experts": true}` plus optional
 `"smoke": true, "max_claims": 1` (a short check run), `"build_rounds": 5, "max_tries": 3, "max_questions": 2,
-"max_spec_fixes": 2, "job_wait_s": 1800, "job_waits": 6, "tune": false, "tune_rounds": 4, "tune_trials": 4, "gpu_hours": 8,
+"max_spec_fixes": 2, "job_wait_start_s": 60, "job_wait_s": 1800, "job_budget_s": 10800, "tune": false, "tune_rounds": 4, "tune_trials": 4, "gpu_hours": 8,
 "models": {"strong": <pool model>, "cheap": <pool model>}`.
 
 - `experts: true` hands each role to the matching member of the **paper-reproducer-team** expert team, which

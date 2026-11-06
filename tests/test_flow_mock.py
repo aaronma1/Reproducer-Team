@@ -558,7 +558,9 @@ async def test_a_job_that_never_finishes_is_given_back_to_the_builder():
     for n in ("", "#2"):
         fx[f"watch:j1{n}"] = {"job_uuid": "j1", "status": "QUEUED", "exit_code": None, "tail": "", "done": False}
     fx["builder:main#2"] = _base()["builder:main"]
-    _, be = await _run(fx, {"job_waits": 2})
-    assert be.calls.count("watch:j1") == 1 and be.calls.count("watch:j1#2") == 1   # two waits, then it stops
-    assert "is still QUEUED after 2 wait(s)" in be.prompts["builder:main#2"]
+    _, be = await _run(fx, {"job_wait_start_s": 60, "job_budget_s": 180})       # room for two waits: 60 + 120
+    assert be.calls.count("watch:j1") == 1 and be.calls.count("watch:j1#2") == 1  # two checks, then it stops
+    assert "max_wait_s=60" in be.prompts["watch:j1"]                            # backoff starts short
+    assert "max_wait_s=120" in be.prompts["watch:j1#2"]                         # and doubles
+    assert "is still QUEUED after 180 s of waiting" in be.prompts["builder:main#2"]
     assert "do not resubmit it" in be.prompts["builder:main#2"]

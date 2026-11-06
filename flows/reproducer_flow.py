@@ -17,7 +17,8 @@ disagreement caps the claim. The rule verdicts are pure python; the judge agent 
 caps and the audits, and every departure from a rule verdict is shown. Prompts state goals, not procedures (2026-11-04).
 
 args: {"paper": str, "compute": "remote" | "local", "gpu_hours": 8, "max_tries": 3, "build_rounds": 5,
-       "max_questions": 2, "max_spec_fixes": 2, "job_wait_s": 1800, "job_waits": 6,
+       "max_questions": 2, "max_spec_fixes": 2,
+       "job_wait_start_s": 60, "job_wait_s": 1800, "job_budget_s": 10800,
        "tune": false, "tune_rounds": 4, "tune_trials": 4, "smoke": false, "max_claims": null, "spec_only": false,
        "models": {"cheap"?, "strong"?}, "root": null}
 
@@ -1157,13 +1158,14 @@ def _record_jobs(eid, jobs):
         pass
 
 
-async def watch_job(args, eid, job_uuid, n):
-    """One cheap turn that only waits: gpu_wait, then report. It submits nothing, cancels nothing, reads no files."""
-    per = int(float(args.get("job_wait_s") or 1800))
+async def watch_job(args, eid, job_uuid, n, wait_s):
+    """One cheap turn that only waits: gpu_wait for `wait_s`, then report. It submits nothing, cancels nothing, reads
+    no files."""
+    per = int(wait_s)
     return await ask(
         f"Wait for GPU job `{job_uuid}` of experiment `{eid}` and report it. Call gpu_wait with "
-        f"job_uuid={job_uuid} and max_wait_s={per}; if it returns still_running, call it again with the same arguments "
-        f"until it is done or you have waited about {per} s in total. Then call gpu_output with job_uuid={job_uuid} "
+        f"job_uuid={job_uuid} and max_wait_s={per}; if it returns still_running, call it again with the same argument "
+        f"until it is done or about {per} s have passed. Then call gpu_output with job_uuid={job_uuid} "
         f"and tail_lines=25 and put that text in `tail`. Report `status` exactly as gpu_wait gives it (QUEUED, "
         f"RUNNING, COMPLETED, FAILED, CANCELLED), `exit_code` (null when there is none) and `done` true only when the "
         f"status is not QUEUED or RUNNING. Submit nothing, cancel nothing, read no files, run no commands.",
@@ -1171,16 +1173,26 @@ async def watch_job(args, eid, job_uuid, n):
 
 
 async def wait_for_jobs(args, eid, jobs):
-    """(finished, text) after waiting on the submitted jobs. The wait is a few cheap watcher turns instead of a long
-    builder turn: a job queued for two hours costs four cheap calls here, not twenty-five strong ones (2026-11-07)."""
-    per, waits = int(float(args.get("job_wait_s") or 1800)), max(1, int(args.get("job_waits") or 6))
+    """(finished, text) after waiting on the submitted jobs, with exponential backoff: `job_wait_start_s` (60 s),
+    doubled up to `job_wait_s` (1800 s), inside `job_budget_s` (3 h) per job.
+
+    Backoff is what gets both ends right: a job that dies after a minute is reported in a minute, a job queued for two
+    hours is looked at a dozen times rather than fifty, and each look is one cheap watcher turn instead of a strong
+    builder turn re-reading its context (2026-11-07)."""
+    cap = float(args.get("job_wait_s") or 1800)
+    start = min(float(args.get("job_wait_start_s") or 60), cap)
+    budget = float(args.get("job_budget_s") or 10800)
     told = []
     for uuid in jobs:
-        last = None
-        for n in range(1, waits + 1):
-            ans = await watch_job(args, eid, uuid, n)
+        spent, wait, n, last = 0.0, start, 0, None
+        while spent < budget:
+            n += 1
+            step = min(wait, cap, budget - spent)
+            ans = await watch_job(args, eid, uuid, n, step)
+            spent += step
             if not ans:
-                log(f"{eid}: watch {uuid} gave no answer (wait {n}/{waits})")
+                log(f"{eid}: watch {uuid} gave no answer (waited {int(spent)}s of {int(budget)}s)")
+                wait *= 2
                 continue
             last = ans
             if ans.get("done"):
@@ -1188,13 +1200,16 @@ async def wait_for_jobs(args, eid, jobs):
                 told.append(f"{uuid} finished: {ans.get('status')}"
                             + (f" (exit {ans['exit_code']})" if ans.get("exit_code") is not None else "")
                             + (f"\nLast output:\n{tail}" if tail else ""))
-                log(f"{eid}: job {uuid} {ans.get('status')} after {n} wait(s)")
+                log(f"{eid}: job {uuid} {ans.get('status')} after {int(spent)}s of waiting")
                 break
-            log(f"{eid}: job {uuid} still {ans.get('status')} (wait {n}/{waits})")
+            log(f"{eid}: job {uuid} still {ans.get('status')} (waited {int(spent)}s of {int(budget)}s, "
+                f"next check in {int(min(wait * 2, cap))}s)")
+            wait *= 2
         else:
             state = (last or {}).get("status") or "unknown"
-            return False, (f"{uuid} is still {state} after {waits} wait(s) of {per} s. The queue is shared; do not "
-                           f"resubmit it. If it is stuck, cancel it and report `failed` with the reason.")
+            return False, (f"{uuid} is still {state} after {int(spent)} s of waiting ({n} checks, backing off to "
+                           f"{int(cap)} s each). The queue is shared; do not resubmit it. If it is stuck, cancel it "
+                           f"and report `failed` with the reason.")
     return True, "\n\n".join(told) or "the job reported no output"
 
 
