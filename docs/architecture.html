@@ -376,6 +376,13 @@ A run that did not finish has no file.</pre>
     <li>Experiment: slug id, arms from the list, compared arms run, metrics defined: <b>retried</b>.</li>
     <li>No usable claims, no valid experiments, or no experiment finished: <b>run stops</b> (could_not_test).</li>
   </ul></div>
+  <div class="card gate"><h4>Flow: build answers</h4><ul>
+    <li>No run files reported, or a reported <code>.json</code> that is missing or does not parse: <b>sent back</b> (skipped when the flow cannot see the run root).</li>
+    <li>A builder's blocking <code>questions</code>: one lead <code>confer</code> turn answers them, at most <code>max_questions</code> (2) per experiment.</li>
+    <li>A review issue with <code>owner: "spec"</code>: the same turn answers it and may patch <code>acceptance</code>, <code>procedure</code>, <code>arms</code> or <code>open_choices</code>; the round is <b>not</b> spent, up to <code>max_spec_fixes</code> (2).</li>
+    <li>An answer with <code>source: "decision"</code> is appended to <code>open_choices</code> (<code>basis: "lead"</code>) and printed in the report.</li>
+    <li>A builder-owned blocking guess with a measured <code>sensitivity_pct</code> ≤ 5%: a <b>note</b>, not a blocker.</li>
+  </ul></div>
   <div class="card gate"><h4>Flow: results</h4><ul>
     <li>Review open after the last round: cap partial.</li>
     <li>Full runs never finished: cap could_not_test.</li>

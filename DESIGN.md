@@ -18,14 +18,21 @@ Constraints the code follows, and the current design in brief. The full descript
 
 - Pipeline: lead (claims, figure readings, experiments) -> per experiment builder <-> reviewer rounds (pilot, then
   full runs) -> evaluator + independent audit per claim -> optional tuner rounds -> rule verdicts -> judge -> reporter.
+- The build loop escalates through one channel (`confer`): a builder's blocking `questions` and a reviewer's
+  `owner: "spec"` issues are answered in one lead turn — with a citation when the paper answers, or as a recorded
+  `decision` that lands in the experiment's `open_choices` with `basis: "lead"` when it does not. That turn may patch
+  `acceptance` / `procedure` / `arms` / `open_choices`. A spec-owned review does not consume a `build_rounds` round
+  (the builder cannot fix what only the lead can fix); `max_questions` and `max_spec_fixes` cap the channel.
+- A review issue carries a stable `key`, an `owner`, and optionally a measured `sensitivity_pct`: a builder-owned
+  guess that moves the claim by at most `SENSITIVITY_TOL` is a note, not a blocker.
 - Workers (lead, figure, builder, evaluator, tuner) on the `strong` tier; checkers (figure-check, reviewer, audit,
   judge) on `cheap`, so a checker is never the worker's own model.
 - Every role may read the paper and render its pages (`view_page`). Builds are not blind to the paper's numbers;
   integrity comes from the fixed run-file format, the evaluator/audit recompute from raw files, and the reviewer.
 - Prompts state goals and five shared rules; no per-role procedure guides.
 - Hard gates are few and listed in `docs/architecture.html` (section 07): structure checks with repairs, the unit
-  check, review-open and runs-never-finished caps, the 2% evaluator/audit agreement cap, rule verdicts at a 15%
-  tolerance floor, and the judge's answer format.
+  check, the build shape check (reported run files exist and parse), review-open and runs-never-finished caps, the 2%
+  evaluator/audit agreement cap, rule verdicts at a 15% tolerance floor, and the judge's answer format.
 - No GPU-hour limit (`GpuConfig.enforce_budget = False`); 30 GPU jobs per role per run.
 - Runs are journaled; `--resume` replays every call whose signature (prompt, label, phase, model, schema, history)
   still matches.
@@ -37,3 +44,6 @@ Constraints the code follows, and the current design in brief. The full descript
 - Until 2026-11-03 the flow had thirteen roles (reader, spec, expert, planner, contracts, contracts-check, builder,
   challenger, gate, audit, tuner, judge, reporter) with a job graph, arm families and a leak check on specs.
 - 2026-11-03: simplified to the pipeline above. 2026-11-04: open-ended prompts and paper access for every role.
+- 2026-11-06: the build loop escalates to the lead instead of re-prompting the builder with a problem it
+  cannot fix (a 20-hour Build phase ended with no report: an acceptance line read `d1=d2=26` off a superscript
+  and three rounds re-reported it).

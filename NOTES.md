@@ -348,7 +348,7 @@ ssh downloads hung with no keepalive; gpu.py now sets ServerAliveInterval.
   to tool calls go to events.jsonl as activity_type "reasoning" (tool_name "thinking" / "says"), up to 20k chars.
 - The 11-04 reppo run was stopped (2026-11-05) and restarted on these prompts. lottery-ticket-small keeps running on
   the old flow; if it needs --resume, use --flow flows/reproducer_flow_lottery_resume.py (a copy of the flow at 076aaf7),
-  and delete that file once the run is done.
+  and delete that file once the run is done. Deleted 2026-11-07: the run is over, so the copy is gone.
 - Web tools (2026-11-05, the user's call; JiuwenSwarm's cluster and agent modes had web access and did not use the
   authors' code): lead, builder, reviewer and tuner get `web_search` (openjiuwen free search, DuckDuckGo/Bing, no key)
   and `web_fetch` (non-HTML responses such as raw GitHub files come back verbatim; HTML goes through openjiuwen's page
@@ -373,3 +373,24 @@ ssh downloads hung with no keepalive; gpu.py now sets ServerAliveInterval.
   docs, URL) or `guess`; the lead must confirm suggestions before giving them, and builders must check every `guess`.
   `spec_only: true` stops the flow after the lead's specs (no builds, nothing exported) to test spec prompts cheaply;
   args/reppo-retrying-spec.json runs it for reppo.
+- Build escalation (2026-11-06, after the 20-hour run `web_1a1ad703422_f961592f77f7` ended with no report): the
+  builder <-> reviewer loop had no route for a problem the builder cannot fix. The lead's e3 spec said the MLP width
+  was `d1=d2=26` (a superscript "6" lost to flat text extraction); the reviewer proved it was `2^6=64` in round 3 and
+  said so in rounds 3, 4 and 5, each time to a builder whose code was already right, and the fifth round ran out.
+  Two more experiments were blocked on unstated guesses ("resolve this constant" with no bound on the search) when
+  the run was stopped. Now: a build answer may carry `questions` (each with `what_i_checked`), a review issue may name
+  `owner: "spec"`, and both go to one `confer` turn of the lead that answers with a `source` (`paper`/`reference`
+  with a citation, or `decision`) and may return a `spec_patch` for `acceptance`/`procedure`/`arms`/`open_choices`.
+  A `decision` is appended to the experiment's `open_choices` with `basis: "lead"` and printed in "Decisions taken
+  during the build", so an unstated setting stays visible instead of being absorbed. A spec-owned review does not
+  spend a `build_rounds` round, since no builder turn can fix it; `max_questions` (2) and `max_spec_fixes` (2) bound
+  the channel, and the `lead:conf:<exp>` turns are serialized by a lock because the experiments run in parallel on one
+  lead session.
+- Measured guesses (2026-11-06): an issue may carry `sensitivity_pct`; a builder-owned blocking issue at or below
+  `SENSITIVITY_TOL` (5%) is downgraded to a note. `REVIEW_RULES` said only that a guess which "could move" a claim is
+  blocking, which nothing can satisfy: both e1 and e2 were blocked that way for hours, and each round of "test it"
+  is an open-ended search. The measurement is what makes the complaint falsifiable.
+- Build shape check (2026-11-06): a build answer that reports no run files, or files that are missing or do not parse,
+  is rejected mechanically before the results are believed. It is skipped when the flow cannot see the run root
+  (headless), and only what a builder can always satisfy blocks - coverage mismatches are logged, not blocking,
+  because a mechanical check that cannot be satisfied is the trap this change exists to remove.

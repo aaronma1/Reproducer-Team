@@ -4,12 +4,20 @@ lead (claims, then one spec per experiment) -> per experiment: builder <-> revie
 -> evaluator computes every claim from the run files -> audit recomputes each claim independently
 -> tuner rounds on the claims that fell short (optional) -> rule verdicts -> judge -> reporter.
 
+The build loop has one escalation channel, `confer`, with two producers: a builder that cannot go on without an
+answer (`questions` in its build answer) and a reviewer that finds the spec itself wrong (`owner: "spec"` on an
+issue). One lead turn answers every open item at once - from the paper when the paper says it, as a recorded decision
+when it does not - and may patch the spec in the same turn. A spec-owned review does not spend a `build_rounds`
+round: the builder must not be asked to fix what only the lead can fix (2026-11-06: an acceptance line read
+`d1=d2=26` off a superscript, three builder rounds re-reported it, none could fix it, and the last round ran out).
+
 Every agent may read the paper (view_page renders a page as an image), so builds are not blind to the paper's numbers;
 the results are still computed twice from the raw run files, by the evaluator and an independent auditor, and a
 disagreement caps the claim. The rule verdicts are pure python; the judge agent sets the final verdicts with them, the
 caps and the audits, and every departure from a rule verdict is shown. Prompts state goals, not procedures (2026-11-04).
 
 args: {"paper": str, "compute": "remote" | "local", "gpu_hours": 8, "max_tries": 3, "build_rounds": 5,
+       "max_questions": 2, "max_spec_fixes": 2,
        "tune": false, "tune_rounds": 4, "tune_trials": 4, "smoke": false, "max_claims": null, "spec_only": false,
        "models": {"cheap"?, "strong"?}, "root": null}
 
@@ -25,7 +33,9 @@ judge) on `cheap`, so a checker is never the same model as the worker it checks.
 
 Imports only `swarmflow` and the standard library, so it also runs inside JiuwenSwarm.
 """
+import asyncio
 import json
+import os
 import re
 
 from swarmflow import agent, agent_session, log, parallel, phase
@@ -49,6 +59,7 @@ RANK = {"could_not_test": 0, "not_reproduced": 1, "partial": 2, "reproduced": 3}
 PARTIAL_FACTOR = 3  # within 3x the tolerance counts as partial
 REL_TOL = 0.15  # least relative tolerance for a match (a claim's own rel_tol can only loosen it)
 AUDIT_TOL = 0.02  # evaluator and audit must agree this closely
+SENSITIVITY_TOL = 5.0  # a guess the reviewer measured to move a claim by at most this percent is not blocking
 SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _UNIT_WORDS = ("normalized", "normalised", "fraction", "probability", "proportion")
 
@@ -420,11 +431,29 @@ def retry_prompt(what, attempt, probs, rules):
             + f"Send the whole corrected {what}.")
 
 
+def _issue(i, owner="builder"):
+    """A review issue with the fields the loop routes on: a stable `key` and an `owner`."""
+    out = dict(i or {})
+    out["owner"] = out.get("owner") or owner
+    out["key"] = out.get("key") or _slugify(out.get("issue", ""))[:64] or "issue"
+    return out
+
+
+def measured_immaterial(i):
+    """A builder-owned guess whose own measured effect on the claim is small: a note, not a blocker."""
+    if (i.get("owner") or "builder") != "builder" or i.get("sensitivity_pct") is None:
+        return False
+    return abs(float(i["sensitivity_pct"])) <= SENSITIVITY_TOL
+
+
 def blocking(review):
-    """Blocking issues of a review. No usable review counts as one blocking issue."""
+    """Blocking issues of a review, each with a `key` and an `owner`. No usable review counts as one blocking issue.
+    A guess the reviewer measured to move a claim by at most SENSITIVITY_TOL is downgraded to a note (its text is
+    still reported): otherwise "this could move the number" blocks every build and no measurement can settle it."""
     if not review:
-        return [{"issue": "the reviewer gave no usable answer", "evidence": "", "action": "review again", "blocking": True}]
-    return [i for i in review.get("issues") or [] if i.get("blocking")]
+        return [{"issue": "the reviewer gave no usable answer", "evidence": "", "action": "review again",
+                 "blocking": True, "key": "no-review", "owner": "builder"}]
+    return [_issue(i) for i in review.get("issues") or [] if i.get("blocking") and not measured_immaterial(i)]
 
 
 def build_problems(built):
@@ -453,14 +482,55 @@ def build_problems(built):
     return out
 
 
+def build_shape_problems(built, exp):
+    """Blocking problems with the shape of a build answer: it reports run files, and they exist and parse. Only what a
+    builder can always satisfy is blocking; a coverage mismatch is logged, because a mechanical check that cannot be
+    satisfied is the trap this flow was in on 2026-11-06. Skipped when the flow cannot see the run root."""
+    files = built.get("run_files") or []
+    if not files:
+        return [{"issue": "no run files were reported for a pilot or a full run", "evidence": built.get("notes") or "",
+                 "action": "write one run file per seed per arm in the format given and report their paths",
+                 "blocking": True, "key": "no-run-files", "owner": "builder"}]
+    root = _HOST["root"]
+    if not root:  # headless runs keep this open: the flow has no path to the workers' tree
+        return []
+    bad, parsed = [], []
+    for f in [f for f in files if f.rstrip().endswith(".json")]:  # the run format is one JSON per run
+        path = os.path.expanduser(f if os.path.isabs(f) else os.path.join(root, f))
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except OSError:
+            bad.append(f"{f} (not found)")
+            continue
+        except ValueError as e:
+            bad.append(f"{f} (not JSON: {e})")
+            continue
+        if not isinstance(doc, dict) or not {"metrics", "config"} <= set(doc):
+            bad.append(f"{f} (no `metrics` or `config`)")
+        else:
+            parsed.append(doc)
+    out = []
+    if bad:
+        out.append({"issue": f"{len(bad)} of {len(parsed) + len(bad)} reported run files are missing or unreadable",
+                    "evidence": "; ".join(bad[:6]), "action": "report only files that exist, in the run format",
+                    "blocking": True, "key": "bad-run-files", "owner": "builder"})
+    arms = {a.get("name") for a in exp.get("arms") or []}
+    seen = {d.get("arm") for d in parsed if d.get("arm")}
+    if arms and seen and not arms <= seen:
+        log(f"{exp.get('id')}: run files cover {', '.join(sorted(seen))} of the arms {', '.join(sorted(arms))}")
+    return out
+
+
 def build_record_section(states):
     """Markdown: each experiment's unstated choices and limits, as the builder last reported them."""
     lines = []
     for s in states:
-        ch, lim = s.get("choices") or [], s.get("limits") or []
-        if not ch and not lim:
+        ch, lim, dec = s.get("choices") or [], s.get("limits") or [], s.get("decisions") or []
+        if not ch and not lim and not dec:
             continue
-        lines.append(f"\n### Settings the paper does not state: {s['experiment']}\n")
+        if ch or lim:
+            lines.append(f"\n### Settings the paper does not state: {s['experiment']}\n")
         if ch:
             lines += ["| Choice | Value | Source | Where |", "|---|---|---|---|"]
             lines += [f"| {c.get('choice')} | {c.get('value')} | {c.get('source')} | {c.get('where')} |" for c in ch]
@@ -469,6 +539,11 @@ def build_record_section(states):
             lines += [f"| {x.get('name')} | {x.get('value')} | {'yes' if x.get('stated_by_paper') else 'no'} | "
                       f"{'not measured' if x.get('bound_fraction') is None else format(x['bound_fraction'], '.2%')} |"
                       for x in lim]
+        if dec:
+            lines += [f"\n### Decisions taken during the build: {s['experiment']}\n",
+                      "| Item | Answer | Source |", "|---|---|---|"]
+            lines += [f"| {d.get('key')} | {str(d.get('answer', '')).replace('|', '/')} | {d.get('source')}"
+                      + (f" ({d.get('citation')})" if d.get("citation") else "") + " |" for d in dec]
     return ("\n## Build settings\n" + "\n".join(lines) + "\n") if lines else ""
 
 
@@ -507,7 +582,7 @@ FIGREAD = obj({"claim_id": S, "page": {"type": "integer"},
                "readings": arr(obj({"field": {"enum": FIELDS}, "raw": N, "value": {"type": "number"},
                                     "uncertainty": {"type": "number"}, "how": S})), "notes": S})
 # Details the paper leaves open that could move a metric (the lead names them, the builder settles each one).
-CHOICE_BASIS = ["paper", "web", "guess"]  # how a suggested setting was confirmed
+CHOICE_BASIS = ["paper", "web", "guess", "lead"]  # how a setting was set; `lead` is written by the flow
 _OC = {"choice": S, "paper_says": S, "why_it_matters": S, "suggested": S, "basis": {"enum": CHOICE_BASIS}}
 OPEN_CHOICE = obj(_OC, [k for k in _OC if k != "basis"])  # optional: older fixtures have none
 _EXP = {"id": S, "arms": arr(obj({"name": S, "description": S})), "procedure": S,
@@ -517,7 +592,12 @@ _EXP = {"id": S, "arms": arr(obj({"name": S, "description": S})), "procedure": S
         "acceptance": arr(S), "open_choices": arr(OPEN_CHOICE)}
 EXPERIMENT = obj(_EXP, [k for k in _EXP if k != "open_choices"])  # optional: older fixtures have none
 SPECS = obj({"experiments": arr(EXPERIMENT), "deferred": arr(obj({"claim_id": S, "reason": S}))})
-REVIEW = obj({"issues": arr(obj({"issue": S, "evidence": S, "action": S, "blocking": B}))})
+# A review issue names its owner: `builder` for something the code can fix, `spec` for the experiment description
+# itself (an acceptance line that contradicts the paper). `sensitivity_pct` is the measured effect on the claim, in
+# percent: a builder-owned guess at or below SENSITIVITY_TOL is a note.
+_ISSUE = {"issue": S, "evidence": S, "action": S, "blocking": B, "key": S,
+          "owner": {"enum": ["builder", "spec"]}, "sensitivity_pct": N, "sensitivity_note": S}
+REVIEW = obj({"issues": arr(obj(_ISSUE, ["issue", "evidence", "action", "blocking"]))})
 # Every setting the code uses that the paper does not state, and where its value came from.
 CHOICE_SOURCES = ["paper", "reference", "measured", "guess"]
 CHOICE = obj({"choice": S, "value": S, "source": {"enum": CHOICE_SOURCES}, "where": S})
@@ -527,8 +607,20 @@ LIMIT = obj({"name": S, "value": S, "stated_by_paper": B, "bound_fraction": N, "
 # Every setting changed since the builder's previous report, and why.
 CHANGE_REASONS = ["paper", "reference", "bug", "result"]
 CHANGE = obj({"change": S, "reason": {"enum": CHANGE_REASONS}, "tested": B, "evidence": S})
-BUILD = obj({"stage": {"enum": ["pilot", "full", "failed"]}, "job_ids": arr(S), "run_files": arr(S), "notes": S,
-             "choices": arr(CHOICE), "limits": arr(LIMIT), "changes": arr(CHANGE)})
+# A builder that cannot go on without an answer asks in `questions`, showing what it already read: a question the
+# paper answers is answered by reading, not by the lead.
+QUESTION = obj({"key": S, "question": S, "what_i_checked": S, "options": arr(S), "blocking": B, "impact_if_wrong": S},
+               ["key", "question", "what_i_checked", "blocking"])
+_BUILD = {"stage": {"enum": ["pilot", "full", "failed"]}, "job_ids": arr(S), "run_files": arr(S), "notes": S,
+          "choices": arr(CHOICE), "limits": arr(LIMIT), "changes": arr(CHANGE), "questions": arr(QUESTION)}
+BUILD = obj(_BUILD, [k for k in _BUILD if k != "questions"])  # questions are optional: most turns have none
+# The lead's one answer turn. `source` says where an answer comes from: `paper`/`reference` (with a citation) answers
+# it; `decision` records a call the paper does not make, which the flow writes into the experiment's open choices.
+_ANSWER = {"key": S, "answer": S, "source": {"enum": ["paper", "reference", "decision"]}, "citation": S, "blocks": B}
+_PATCH = {"acceptance": arr(S), "procedure": S, "arms": arr(obj({"name": S, "description": S})),
+          "open_choices": arr(OPEN_CHOICE)}
+CONF = obj({"answers": arr(obj(_ANSWER, ["key", "answer", "source"])),
+            "spec_patch": obj(_PATCH, []), "notes": S}, ["answers"])
 LIMIT_TOL = 0.01  # a limit the paper does not state may cut at most this fraction of episodes/steps/samples
 _ITEM = {"value": N, "a": CI, "b": CI, "diff": CI}
 _REQ = ["value", "a", "b"]
@@ -689,13 +781,17 @@ class _Turns:
         self.base, self.n, self.sess = base, 0, session(**kw)
         self.first, self.answered = None, False
 
-    async def send(self, prompt, schema):
-        self.n += 1
-        if self.first is None:
-            self.first = prompt
-        elif not self.answered:
-            prompt = f"{self.first}\n\n{prompt}"
-        ans = await self.sess.send(prompt, schema=schema, options={"label": _try(self.base, self.n)})
+    async def send(self, prompt, schema, label=None):
+        """One turn. `label` names a turn of another kind on the same session (the build conference); it does not
+        advance the base counter, so `lead`, `lead#2`, ... keep meaning what they say."""
+        if label is None:
+            self.n += 1
+            if self.first is None:
+                self.first = prompt
+            elif not self.answered:
+                prompt = f"{self.first}\n\n{prompt}"
+            label = _try(self.base, self.n)
+        ans = await self.sess.send(prompt, schema=schema, options={"label": label})
         self.answered = self.answered or ans is not None
         return ans
 
@@ -889,9 +985,93 @@ def _exp_brief(exp):
                                 "open_choices") if k in exp}
 
 
-async def build_experiment(args, exp, claims):
-    """Builder <-> reviewer rounds: a pilot, then the full runs. Returns the experiment's review state."""
+_LEAD_LOCK = asyncio.Lock()  # one lead session, several experiments: a conference turn never interleaves
+
+
+def apply_patch(exp, patch):
+    """(experiment, applied keys, ignored reasons). Only the description fields can change, and an arm patch must
+    keep the arm names: the claims, the specs' comparisons and every run file refer to them."""
+    if not patch:
+        return exp, [], []
+    out, applied, ignored = dict(exp), [], []
+    for key in ("acceptance", "procedure", "open_choices"):
+        if patch.get(key):
+            out[key] = patch[key]
+            applied.append(key)
+    arms = patch.get("arms")
+    if arms:
+        before, after = [a.get("name") for a in exp.get("arms") or []], [a.get("name") for a in arms]
+        if after == before:
+            out["arms"] = arms
+            applied.append("arms")
+        else:
+            ignored.append(f"arms {after} are not the spec's {before}: arm names cannot change under the claims")
+    return out, applied, ignored
+
+
+async def confer(args, lead, exp, claims, items, n):
+    """(experiment, answers, applied) after one lead turn on the open items. `items` are a builder's questions
+    (`kind: question`) and a reviewer's spec-owned issues (`kind: issue`). An answer's `source` is `paper` or
+    `reference` (with a citation) or `decision`; a decision is written into the experiment's open choices with
+    `basis: "lead"`, so a setting the paper does not state stays visible in the report as a decision."""
+    eid = exp["id"]
+    brief = {**exp, "claims": [c for c in claims if c["id"] in {x["claim_id"] for x in exp["claims"]}]}
+    item_md = "\n".join(
+        (f"- [{i['key']}] QUESTION (the builder cannot go on): {i['text']}\n"
+         f"  already checked: {i.get('detail') or '-'}\n  if wrong: {i.get('impact') or '-'}")
+        if i["kind"] == "question" else
+        (f"- [{i['key']}] SPEC ISSUE (the reviewer says the experiment description is wrong): {i['text']}\n"
+         f"  evidence: {i.get('detail') or '-'}\n  proposed fix: {i.get('impact') or '-'}")
+        for i in items)
+    prompt = (
+        "You wrote this experiment's spec; the build is paused on the items below. Answer every one, in one turn.\n"
+        "Per answer: `answer` is the instruction the builder follows; `source` is where it comes from - `paper` or "
+        "`reference` with the page, section or file in `citation`, or `decision` when the paper does not say and the "
+        "call is yours (never present a decision as the paper's); `blocks` is true when it must be applied before the "
+        "next run. If an item is a spec issue, return `spec_patch` with the corrected fields verbatim: `acceptance` "
+        "(the whole list), `procedure`, `arms` (same names, corrected descriptions) or `open_choices`. Leave the "
+        "claims, the metrics and the seeds alone. Check the paper yourself before answering - view_page renders a "
+        "page, which settles a superscript that flat text loses - because a wrong number in the spec blocks the build "
+        "for as many rounds as it takes.\n\nItems:\n" + item_md
+        + f"\n\nExperiment as the builder has it:\n{_j(brief)}")
+    async with _LEAD_LOCK:
+        ans = await lead.send(prompt, schema=CONF, label=_try(f"lead:conf:{eid}", n))
+    if not ans:
+        return exp, [], []
+    answers = [{**a, "blocks": bool(a.get("blocks", True))} for a in ans.get("answers") or []]
+    exp2, applied, ignored = apply_patch(exp, ans.get("spec_patch"))
+    for why in ignored:
+        log(f"{eid}: spec patch ignored: {why}")
+    if applied:
+        log(f"{eid}: spec patched: {', '.join(applied)}")
+    for a in answers:
+        if a.get("source") == "decision":  # an unstated setting: keep it visible instead of absorbing it
+            exp2 = {**exp2, "open_choices": list(exp2.get("open_choices") or []) + [{
+                "choice": str(a.get("answer", ""))[:200], "paper_says": "nothing", "why_it_matters": "",
+                "suggested": "as answered by the lead", "basis": "lead"}]}
+        log(f"{eid}: conference {a.get('key')}: {a.get('source')} - {str(a.get('answer'))[:160]}")
+    return exp2, answers, applied
+
+
+def answer_text(answers, applied):
+    """The builder's next prompt after a conference: what was answered, and whether the spec changed."""
+    if not answers and not applied:
+        return ("The lead gave no answer. Use your judgement, record the setting as a `guess` in `choices` with its "
+                "measured effect, and go on.")
+    head = "The lead answered:\n" + "\n".join(
+        f"- [{a['key']}] {a['answer']} (source: {a['source']}" + (f"; {a['citation']}" if a.get("citation") else "")
+        + ")" for a in answers) if answers else "The lead did not answer, but the spec changed."
+    if applied:
+        head += ("\nThe spec was patched (" + ", ".join(applied) + "); the experiment below supersedes the one you "
+                 "have.")
+    return head
+
+
+async def build_experiment(args, exp, claims, lead):
+    """Builder <-> reviewer rounds (pilot, then full runs) with one escalation channel to the lead.
+    Returns the experiment's review state."""
     eid, rounds = exp["id"], int(args.get("build_rounds", 5))
+    max_questions, max_fixes = int(args.get("max_questions", 2)), int(args.get("max_spec_fixes", 2))
     code_dir = f"repo/arms/{eid}"
     fmt = run_format("repo/arms")
     builder = _Turns(f"builder:{eid}", options=_opts(args, "builder"),
@@ -899,9 +1079,15 @@ async def build_experiment(args, exp, claims):
     brief = {**exp, "claims": [c for c in claims if c["id"] in {x["claim_id"] for x in exp["claims"]}]}
     prompt = (f"Reproduce this experiment from paper.pdf (and scope.txt): implement it in {code_dir}/ as the paper "
               f"describes, run a short pilot first and report stage `pilot`; the full runs come after the pilot is "
-              f"reviewed. {BUILD_RULES}\nWrite the run files in this format:\n{fmt}\n\nExperiment:\n{_j(brief)}")
+              f"reviewed. {BUILD_RULES}\nIf you cannot go on without an answer the paper does not give, put the "
+              f"question in `questions` with what you already checked instead of guessing: the lead answers in one "
+              f"turn.\nWrite the run files in this format:\n{fmt}\n\nExperiment:\n{_j(brief)}")
     stage, open_issues, record = None, ["never reviewed"], {}
-    for rnd in range(1, rounds + 1):
+    decisions, used, fixes, asked, reviews, turns = [], 0, 0, 0, 0, 0
+    # `used` counts reviews only: a turn that asks or that triggers a spec patch is not a review round. `turns` is a
+    # hard stop so an experiment whose lead never resolves anything still ends.
+    while used < rounds and turns < rounds + max_questions + max_fixes + 3:
+        turns += 1
         built = await builder.send(prompt, schema=BUILD)
         if not built or built["stage"] == "failed":
             prompt = "That did not work. Fix what failed and report again (`pilot` first if no pilot passed review)."
@@ -909,31 +1095,61 @@ async def build_experiment(args, exp, claims):
             continue
         stage = built["stage"]
         record = {"choices": built.get("choices") or [], "limits": built.get("limits") or []}
-        auto = build_problems(built)
+        open_q = [q for q in (built.get("questions") or []) if q.get("blocking")]
+        if open_q and asked >= max_questions:
+            log(f"{eid}: {len(open_q)} question(s) left unanswered: the {max_questions}-question budget is spent")
+        if open_q and asked < max_questions:
+            items = [{"kind": "question", "key": q.get("key") or _slugify(str(q.get("question", "")))[:64],
+                      "text": q.get("question", ""), "detail": q.get("what_i_checked", ""),
+                      "impact": q.get("impact_if_wrong", "")} for q in open_q]
+            asked += len(items)
+            exp, answers, _ = await confer(args, lead, exp, claims, items, len(decisions) + 1)
+            decisions += [{**a, "experiment": eid} for a in answers]
+            brief = {**exp, "claims": [c for c in claims if c["id"] in {x["claim_id"] for x in exp["claims"]}]}
+            prompt = (answer_text(answers, []) + f"\nGo on with the build.\nExperiment:\n{_j(brief)}\n"
+                      f"Write the run files in this format:\n{fmt}")
+            continue
+        auto = build_problems(built) + build_shape_problems(built, exp)
         for i in auto:
             log(f"{eid}: build check: {i['issue']}")
+        reviews += 1
         review = await ask(
             f"Review experiment `{eid}` at stage `{stage}`: read paper.pdf, the code in {code_dir}/ and the run "
             f"files, and judge whether this reproduces the paper's experiment faithfully and whether the results "
             f"look right. {REVIEW_RULES} Report each problem with evidence and the fix; mark it blocking if it "
-            f"should be fixed before going on.\nRun format:\n{fmt}\nExperiment:\n{_j(brief)}\n"
+            f"should be fixed before going on, give it a stable `key`, set `owner` to `spec` when the experiment "
+            f"description rather than the code is wrong, and give `sensitivity_pct` (the claim's move, in percent) "
+            f"when you measured how much a guess matters.\nRun format:\n{fmt}\nExperiment:\n{_j(brief)}\n"
             f"Run files: {built['run_files']}\nBuilder's choices, limits and changes:\n"
             f"{_j({k: built.get(k) or [] for k in ('choices', 'limits', 'changes')})}\n"
             f"Builder notes: {built['notes']}",
-            label=_try(f"reviewer:{eid}", rnd), schema=REVIEW, options=_opts(args, "reviewer"))
+            label=_try(f"reviewer:{eid}", reviews), schema=REVIEW, options=_opts(args, "reviewer"))
         issues = auto + blocking(review)
         open_issues = [i["issue"] for i in issues]
-        notes = [i for i in (review or {}).get("issues") or [] if not i.get("blocking")]
+        notes = [i for i in (review or {}).get("issues") or [] if not i.get("blocking") or measured_immaterial(i)]
+        spec_issues = [i for i in issues if i.get("owner") == "spec"]
+        if spec_issues and fixes < max_fixes:
+            fixes += 1  # this round is void: the builder cannot fix an acceptance line only the lead can change
+            items = [{"kind": "issue", "key": i.get("key") or "spec", "text": i["issue"],
+                      "detail": i.get("evidence", ""), "impact": i.get("action", "")} for i in spec_issues]
+            exp, answers, applied = await confer(args, lead, exp, claims, items, len(decisions) + 1)
+            decisions += [{**a, "experiment": eid} for a in answers]
+            brief = {**exp, "claims": [c for c in claims if c["id"] in {x["claim_id"] for x in exp["claims"]}]}
+            prompt = (answer_text(answers, applied) + f"\nReport again at stage `{stage}`, against this experiment:"
+                      f"\n{_j(brief)}")
+            continue
+        used += 1
         if issues:
             prompt = ("The reviewer found blocking problems. Fix them, re-run what they change, and report again at "
                       f"stage `{stage}`:\n" + format_issues(issues))
             continue
         if stage == "full":
-            return {"experiment": eid, "ran": True, "reviewed": True, "rounds": rnd, "open": [], **record}
+            return {"experiment": eid, "ran": True, "reviewed": True, "rounds": used, "open": [],
+                    "decisions": decisions, "spec": exp, **record}
         prompt = (f"The pilot passed review. Now run the full experiment, download every run file and report stage "
                   f"`full`." + (f"\nReviewer notes:\n{format_issues(notes)}" if notes else ""))
-    return {"experiment": eid, "ran": stage == "full", "reviewed": False, "rounds": rounds, "open": open_issues,
-            **record}
+    return {"experiment": eid, "ran": stage == "full", "reviewed": False, "rounds": used, "open": open_issues,
+            "decisions": decisions, "spec": exp, **record}
 
 
 async def evaluate(args, exps, by_id, root):
@@ -1075,7 +1291,10 @@ async def run(args):
     exp_of = {c["claim_id"]: e["id"] for e in exps for c in e["claims"]}
 
     phase("Build")
-    states = await parallel([lambda e=e: build_experiment(args, e, claims) for e in exps])
+    states = await parallel([lambda e=e: build_experiment(args, e, claims, lead) for e in exps])
+    for s in states:  # a spec the lead patched mid-build supersedes the one it first wrote, downstream too
+        if s.get("spec"):
+            exps = [s["spec"] if e["id"] == s["experiment"] else e for e in exps]
     caps = []
     for s in states:
         if not s["ran"]:
@@ -1158,5 +1377,5 @@ async def run(args):
         label="reporter", options=_opts(args, "reporter"))
     return {"verdict": verdict, "claims": rows, "table": table, "caps": caps, "caps_md": caps_md,
             "experiments": states, "audits": audits, "tuned_audits": tuned_audits, "deferred": deferred,
-            "figure_reads": fig_records,
+            "figure_reads": fig_records, "lead_decisions": [d for s in states for d in s.get("decisions") or []],
             "rejected_claims": rejected, "report": report}

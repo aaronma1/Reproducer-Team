@@ -331,3 +331,125 @@ async def test_with_a_claim_limit_only_the_selected_claims_are_read_off_figures(
     fx2["lead#2"]["deferred"] = [{"claim_id": "c2", "reason": "limit"}]
     _, be2 = await _run(fx2, {"max_claims": 1})
     assert not any(c.startswith("figure") for c in be2.calls)           # c2 was deferred: no figure reads
+
+
+# --- the build escalation channel: builder questions and spec-owned review issues (2026-11-06) ---
+
+QUESTION = {"key": "d-width", "question": "Is the MLP width d1 = d2 = 26 or 2^6 = 64? The acceptance says 26.",
+            "what_i_checked": "paper.pdf p.64 is a raster line whose text extraction gives '26'",
+            "blocking": True, "impact_if_wrong": "the hidden width, W1's fan-in and every norm in the pilot"}
+SPEC_ISSUE = {"issue": "The acceptance line says d1=d2=26; the paper says d1=d2=2^6=64",
+              "evidence": "paper.pdf p.64: the 6 is a superscript, size 6.97 on a raised baseline",
+              "action": "fix the spec to d1=d2=2^6=64", "blocking": True, "owner": "spec", "key": "d-width"}
+
+
+async def test_builder_question_is_answered_without_costing_a_review_round():
+    fx = _base()
+    fx["builder:main"] = {**fx["builder:main"], "questions": [QUESTION]}
+    fx["builder:main#2"] = _base()["builder:main"]            # pilot, now that it has the answer
+    fx["builder:main#3"] = _base()["builder:main#2"]          # full runs
+    fx["lead:conf:main"] = {"answers": [{"key": "d-width", "answer": "d1 = d2 = 2^6 = 64, not 26",
+                                         "source": "paper", "citation": "App. H.3.1 p.64", "blocks": True}]}
+    r, be = await _run(fx, {"build_rounds": 2})
+    assert r["verdict"] == "reproduced"
+    assert "lead:conf:main" in be.calls
+    assert "d1 = d2 = 2^6 = 64, not 26" in be.prompts["builder:main#2"]      # the answer reaches the builder
+    assert "Is the MLP width" in be.prompts["lead:conf:main"]                # the question reaches the lead
+    exp = r["experiments"][0]
+    assert (exp["ran"], exp["reviewed"], exp["rounds"]) == (True, True, 2)   # the asking turn cost no review
+    assert [(d["key"], d["source"]) for d in r["lead_decisions"]] == [("d-width", "paper")]
+
+
+async def test_spec_owned_issue_is_patched_by_the_lead_not_sent_back_to_the_builder():
+    fx = _base()
+    fx["reviewer:main"] = {"issues": [SPEC_ISSUE]}
+    fx["builder:main#2"] = _base()["builder:main"]
+    fx["builder:main#3"] = _base()["builder:main#2"]
+    fx["reviewer:main#2"] = OK
+    fx["reviewer:main#3"] = OK
+    fx["lead:conf:main"] = {"answers": [{"key": "d-width", "answer": "the spec is wrong: d1=d2=2^6=64",
+                                         "source": "paper", "citation": "App. H.3.1 p.64"}],
+                            "spec_patch": {"acceptance": ["5 run files per arm, seeds 0..4", "d1=d2=2^6=64"]}}
+    r, be = await _run(fx, {"build_rounds": 2})
+    assert r["verdict"] == "reproduced"
+    assert "d1=d2=2^6=64" in be.prompts["builder:main#2"]                   # the corrected spec reaches the builder
+    assert "spec was patched" in be.prompts["builder:main#2"]
+    assert "The reviewer found blocking problems" not in be.prompts["builder:main#2"]  # not a builder defect
+    exp = r["experiments"][0]
+    assert (exp["ran"], exp["reviewed"], exp["rounds"]) == (True, True, 2)   # 3 reviews, 2 rounds: the void one free
+    assert be.calls.count("reviewer:main") == 1 and "reviewer:main#3" in be.calls
+    assert "d1=d2=2^6=64" in be.prompts["evaluator"]        # the patched spec reaches the evaluator too
+
+
+async def test_spec_amendments_are_capped_and_the_loop_still_ends():
+    fx = _base()
+    for n in ("", "#2", "#3", "#4"):
+        fx[f"reviewer:main{n}"] = {"issues": [SPEC_ISSUE]}
+    for n in ("#2", "#3"):
+        fx[f"builder:main{n}"] = _base()["builder:main"]
+    fx["builder:main#4"] = _base()["builder:main#2"]
+    patch = {"answers": [{"key": "d-width", "answer": "patched", "source": "paper"}],
+             "spec_patch": {"acceptance": ["d1=d2=2^6=64"]}}
+    fx["lead:conf:main"], fx["lead:conf:main#2"] = patch, patch
+    r, be = await _run(fx, {"build_rounds": 2, "max_spec_fixes": 2})
+    assert sum(c.startswith("lead:conf:main") for c in be.calls) == 2         # the cap holds
+    assert r["verdict"] == "partial"                                         # full runs done, review still open
+
+
+async def test_a_measured_small_sensitivity_is_a_note_not_a_blocker():
+    fx = _base()
+    fx["reviewer:main"] = {"issues": [{
+        "issue": "init scale is an unstated guess", "evidence": "train.py:44 init_scale=1.0",
+        "action": "test it", "blocking": True, "key": "init-scale", "owner": "builder",
+        "sensitivity_pct": 1.2, "sensitivity_note": "scanned 1.0-10.0: the claim moves 1.2%"}]}
+    r, be = await _run(fx)
+    assert r["verdict"] == "reproduced"
+    assert "pilot passed review" in be.prompts["builder:main#2"]             # it went on to the full runs
+    assert "init scale is an unstated guess" in be.prompts["builder:main#2"]  # the note is still reported
+    assert not any(c.startswith("lead:conf") for c in be.calls)              # nothing was escalated
+
+
+async def test_a_build_with_no_run_files_is_sent_back():
+    fx = _base()
+    fx["builder:main"] = {**fx["builder:main"], "run_files": []}
+    fx["builder:main#2"] = _base()["builder:main"]
+    fx["builder:main#3"] = _base()["builder:main#2"]
+    fx["reviewer:main#3"] = OK
+    r, be = await _run(fx)
+    assert "no run files were reported" in be.prompts["builder:main#2"]   # the empty answer is not accepted
+    assert "builder:main#2" in be.calls
+    assert r["verdict"] == "reproduced"
+
+
+async def test_a_lead_decision_stays_visible_in_the_report():
+    fx = _base()
+    fx["builder:main"] = {**fx["builder:main"], "questions": [QUESTION]}
+    fx["builder:main#2"] = _base()["builder:main"]
+    fx["builder:main#3"] = _base()["builder:main#2"]
+    fx["lead:conf:main"] = {"answers": [{"key": "d-width", "answer": "use width 64; it does not move the claim",
+                                         "source": "decision"}]}
+    r, _ = await _run(fx)
+    assert r["lead_decisions"][0]["source"] == "decision"
+    assert "Decisions taken during the build: main" in r["caps_md"]
+    assert "use width 64; it does not move the claim" in r["caps_md"]
+
+
+async def test_the_shape_check_reads_the_run_files_when_it_can_see_them(tmp_path):
+    fx = _base()
+    fx["builder:main"] = {**fx["builder:main"], "run_files": ["repo/arms/main/runs/m/seed0.json"]}
+    fx["builder:main#2"] = _base()["builder:main"]
+    fx["builder:main#3"] = _base()["builder:main#2"]
+    fx["reviewer:main#3"] = OK
+    _, be = await _run(fx, {"root": str(tmp_path)})
+    assert "reported run files are missing" in be.prompts["builder:main#2"]      # nothing on disk
+    seed = tmp_path / "repo" / "arms" / "main" / "runs" / "m" / "seed0.json"
+    seed.parent.mkdir(parents=True)
+    seed.write_text('{"arm": "m", "config": {"lr": 0.001}, "metrics": {"acc": 0.5}}')
+    _, be2 = await _run(_base_with_one_run_file(fx), {"root": str(tmp_path)})
+    assert "reported run files are missing" not in be2.prompts["builder:main#2"]  # the file is there and parses
+
+
+def _base_with_one_run_file(fx):
+    out = dict(fx)
+    out["builder:main"] = {**out["builder:main"], "run_files": ["repo/arms/main/runs/m/seed0.json"]}
+    return out
