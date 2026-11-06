@@ -152,7 +152,10 @@ def test_combine_figure_reads(f):
     assert abs(out["paper_a"] - 0.70) < 1e-9 and not recs[0]["agree"] and abs(out["rel_tol"] - 0.1 / 0.7) < 1e-9
     raw = {"readings": [{"field": "paper_a", "value": 150.0, "uncertainty": 5.0}]}
     out, recs = f.combine_reads(c, [raw, None])                       # a raw score on a normalized metric
-    assert out["paper_a"] == 0.9 and "units" in recs[0]["note"]
+    assert out["paper_a"] == 0.9 and "range" in recs[0]["note"]       # dropped before it could be averaged in
+    neg = {"readings": [{"field": "paper_a", "value": -0.39, "uncertainty": 0.005}]}
+    out, recs = f.combine_reads(c, [{"readings": [{"field": "paper_a", "value": 1.0, "uncertainty": 0.0}]}, neg])
+    assert out["paper_a"] == 1.0 and recs[0]["agree"] and recs[0]["dropped"] == [-0.39]   # d-mask-ar1, 2026-11-07
 
 
 def test_which_claims_need_a_figure_read(f):

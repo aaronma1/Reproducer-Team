@@ -389,23 +389,59 @@ def needs_figure_read(claim):
         claim.get("source") is None and any("fig" in str(a).lower() for a in claim.get("anchors") or [])))
 
 
+def _field_reads(claim, field, reads):
+    """(usable readings, dropped values) for one field. A reading outside the metric's range is not a reading of it:
+    when the lead's own value is a fraction (0..1), a negative or far larger reading came from a different quantity
+    (2026-11-07, d-mask-ar1: one reader reported the raw weight -0.39 for a metric that reads `1 - d_Jac`, i.e. 1)."""
+    lead = claim.get(field)
+    bounded = isinstance(lead, (int, float)) and 0 <= lead <= 1
+    got, dropped = [], []
+    for read in reads:
+        for r in (read or {}).get("readings") or []:
+            if r.get("field") != field or r.get("value") is None:
+                continue
+            v = float(r["value"])
+            if bounded and not (-1e-6 <= v <= 1.5):
+                dropped.append(v)
+                continue
+            got.append((v, _unc(r)))
+    return got, dropped
+
+
+def reads_disagree(claim, reads):
+    """True when two usable readings of a field are further apart than their own uncertainties."""
+    for field in figure_fields(claim):
+        got, _ = _field_reads(claim, field, reads)
+        if len(got) >= 2 and abs(got[0][0] - got[1][0]) > got[0][1] + got[1][1] + 1e-12:
+            return True
+    return False
+
+
 def combine_reads(claim, reads):
     """(claim with its paper numbers set from the figure readings, one record per field). Two readings are averaged;
     the uncertainty is the larger reported one, or half their gap if that is larger, and it widens the claim's
     tolerance (a number read off a plot is only as exact as the reading). A field nobody read keeps the lead's value."""
     out, records = dict(claim), []
     for field in figure_fields(claim):
-        got = [(float(r["value"]), _unc(r)) for read in reads if read
-               for r in read.get("readings") or [] if r.get("field") == field]
-        rec = {"claim_id": claim["id"], "field": field, "lead": claim.get(field), "reads": got}
+        got, dropped = _field_reads(claim, field, reads)
+        rec = {"claim_id": claim["id"], "field": field, "lead": claim.get(field), "reads": got, "dropped": dropped}
         if not got:
-            records.append({**rec, "value": claim.get(field), "uncertainty": None, "agree": None})
+            records.append({**rec, "value": claim.get(field), "uncertainty": None, "agree": None,
+                            "note": (f"every reading was out of the metric's range ({', '.join(f'{d:g}' for d in dropped)});"
+                                     " kept the lead's value") if dropped else ""})
             continue
+        if len(got) >= 3:  # a tie-break read decides: drop the one farthest from the median
+            med = sorted(v for v, _ in got)[len(got) // 2]
+            k = max(range(len(got)), key=lambda i: abs(got[i][0] - med))
+            dropped.append(got[k][0])
+            got = [g for i, g in enumerate(got) if i != k]
         vals = [v for v, _ in got]
         value = sum(vals) / len(vals)
         gap = (max(vals) - min(vals)) / 2
-        unc = max([u for _, u in got] + [gap])
         agree = len(got) < 2 or abs(vals[0] - vals[1]) <= got[0][1] + got[1][1] + 1e-12
+        # The disagreement may widen the band, but never past MAX_READ_TOL: a gap that big is a wrong reading, not a
+        # wide reading, and a 70% band makes every measurement a match (2026-11-07, d-mask-ar1).
+        unc = max([u for _, u in got] + [min(gap, MAX_READ_TOL * abs(value))])
         trial = {**out, field: value}
         if unit_problems(trial):  # a reading in the wrong units is not used
             records.append({**rec, "value": claim.get(field), "uncertainty": None, "agree": False,
@@ -414,7 +450,11 @@ def combine_reads(claim, reads):
         out = trial
         if value:
             out["rel_tol"] = max(float(out.get("rel_tol") or 0.0), unc / abs(value))
-        records.append({**rec, "value": value, "uncertainty": unc, "agree": agree})
+        note = ""
+        if dropped:
+            note = (f"{len(dropped)} reading(s) out of the metric's range dropped "
+                    f"({', '.join(f'{d:g}' for d in dropped)})")
+        records.append({**rec, "value": value, "uncertainty": unc, "agree": agree, "note": note})
     return out, records
 
 
@@ -426,7 +466,8 @@ def figure_section(records):
         reads = ", ".join(f"{v:.4g} ± {u:.2g}" for v, u in r["reads"]) or "none"
         val = "kept the lead's value" if r["uncertainty"] is None else f"{r['value']:.4g} ± {r['uncertainty']:.2g}"
         out.append(f"- `{r['claim_id']}` {r['field']}: lead {r['lead']}, readings {reads} -> {val}"
-                   + ("" if r["agree"] in (True, None) else " (the readings disagree; tolerance widened to cover both)"))
+                   + ("" if r["agree"] in (True, None) else " (the readings disagree; tolerance widened to cover both)")
+                   + (f" ({r['note']})" if r.get("note") else ""))
     return "\n".join(out) + "\n"
 
 
@@ -972,7 +1013,7 @@ async def read_figures(args, claims):
     if not todo:
         return claims, []
 
-    def read_one(c, role):
+    def read_one(c, role, n=1):
         fields = {"paper_value": "the number for the method in `text`",
                   "paper_a": f"the value of arm `{c.get('better')}`", "paper_b": f"the value of arm `{c.get('worse')}`"}
         return ask(
@@ -981,14 +1022,31 @@ async def read_figures(args, claims):
             f"curve where the claim says (e.g. the end of training), using the axis ticks. For each field give the raw "
             f"reading in the plot's units, the value in the claim's metric units (apply the normalization the paper "
             f"states, if the metric is normalized), and an honest uncertainty (half-width, in the metric's units) from "
-            f"the tick spacing, line width and any shaded band. Explain in `how` which curve and point you read.\n"
+            f"the tick spacing, line width and any shaded band. A derived metric (a mask similarity, a distance, a "
+            f"ratio, a difference) must be computed from the numbers you read and given in its own units: never report "
+            f"the raw quantity you read it from. If the figure does not print what the metric needs, send null for "
+            f"that field and say in `how` what is missing - a value outside the metric's range is worse than no value. "
+            f"Explain in `how` which curve and point you read.\n"
             f"Fields: {_j({k: fields[k] for k in figure_fields(c)})}\nWhere: {c.get('figure') or c.get('anchors')}\n"
             f"Claim:\n{_j(public_claim(c))}",
-            label=f"{role}:{c['id']}", schema=FIGREAD, options=_opts(args, role))
-    reads = await parallel([lambda c=c, role=role: read_one(c, role) for c in todo for role in ("figure", "figure-check")])
+            label=_try(f"{role}:{c['id']}", n), schema=FIGREAD, options=_opts(args, role))
+
+    reads = await parallel([lambda c=c, role=role: read_one(c, role) for c in todo
+                            for role in ("figure", "figure-check")])
+    per = {c["id"]: list(reads[2 * i:2 * i + 2]) for i, c in enumerate(todo)}
+    tie = [c for c in todo if reads_disagree(c, per[c["id"]])]
+    if tie:
+        # A third reading decides: two readings that disagree cannot say which one is wrong, and averaging them is
+        # how a 70% tolerance got written (2026-11-07). The tie-break is the strong tier, because the cheap check is
+        # the reader that most often reports the wrong quantity.
+        log(f"figure: {len(tie)} claim(s) with disagreeing readings, reading again: "
+            + ", ".join(c["id"] for c in tie))
+        extra = await parallel([lambda c=c: read_one(c, "figure", 2) for c in tie])
+        for c, r in zip(tie, extra):
+            per[c["id"]].append(r)
     out, records = {c["id"]: c for c in claims}, []
-    for i, c in enumerate(todo):
-        out[c["id"]], recs = combine_reads(c, reads[2 * i:2 * i + 2])
+    for c in todo:
+        out[c["id"]], recs = combine_reads(c, per[c["id"]])
         records += recs
     for r in records:
         if r["uncertainty"] is not None:

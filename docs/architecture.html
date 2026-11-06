@@ -372,6 +372,7 @@ A run that did not finish has no file.</pre>
     <li>Arm names and claim ids must be slugs: <b>renamed</b>, not sent back.</li>
     <li>Claim fields (value has a number, predicate has op and target, ordering has two listed arms): <b>retried</b>, dropped on the last try.</li>
     <li>Unit check: a normalized, fraction, probability or proportion metric may not have a paper number above 1.5: <b>retried</b>.</li>
+    <li>Figure readings: outside the metric's range (a fraction that reads negative) → <b>dropped</b>; two readings that disagree → one tie-break read, then the outlier is dropped; the disagreement widens the tolerance only to 50%.</li>
     <li>Selection: unknown ids and repeats <b>dropped</b>, unaddressed claims <b>deferred</b>, cut to <code>max_claims</code>.</li>
     <li>Experiment: slug id, arms from the list, compared arms run, metrics defined: <b>retried</b>.</li>
     <li>No usable claims, no valid experiments, or no experiment finished: <b>run stops</b> (could_not_test).</li>

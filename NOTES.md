@@ -407,3 +407,13 @@ ssh downloads hung with no keepalive; gpu.py now sets ServerAliveInterval.
   (the 2026-11-06 run ended after twenty hours with an empty answer). It now writes `report.md` under the run root with
   the reason, one row per experiment (full runs yes/no, review open, rounds, open findings) and the lead's decisions,
   and returns the same text as `report`. There is no agent to ask at that point, so the flow writes it itself.
+
+- Figure readings that disagree (2026-11-07): the d-mask-ar1 read of the live run came out as `0.305 ± 0.7`, a 70%
+  tolerance, because one reader reported the raw weight `-0.39` for a metric that reads `1 - d_Jac` (the strong reader
+  correctly returned 1.0) and `combine_reads` averaged two readings in different units. Three changes: a reading
+  outside the metric's range is dropped before combining (when the lead's own value is a fraction, a negative or
+  >1.5 reading came from another quantity), the disagreement may widen the band but never past `MAX_READ_TOL` (0.5),
+  and two readings that disagree trigger one tie-break read from the strong tier, after which the reading farthest
+  from the median is dropped. The figure prompt now says a derived metric must be computed and reported in its own
+  units, and that a figure that does not print what the metric needs gets `null`, not a nearby number. Widening the
+  tolerance was never making the number more accurate: at 70% every measurement matched.

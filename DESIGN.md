@@ -27,6 +27,8 @@ Constraints the code follows, and the current design in brief. The full descript
   guess that moves the claim by at most `SENSITIVITY_TOL` is a note, not a blocker.
 - Workers (lead, figure, builder, evaluator, tuner) on the `strong` tier; checkers (figure-check, reviewer, audit,
   judge) on `cheap`, so a checker is never the worker's own model.
+- Figure numbers are read twice (one per tier); a reading outside the metric's range is dropped, a disagreement
+  triggers one tie-break read and may widen the tolerance only to `MAX_READ_TOL`, never to the raw gap.
 - Every role may read the paper and render its pages (`view_page`). Builds are not blind to the paper's numbers;
   integrity comes from the fixed run-file format, the evaluator/audit recompute from raw files, and the reviewer.
 - Prompts state goals and five shared rules; no per-role procedure guides.

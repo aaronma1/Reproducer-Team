@@ -219,18 +219,38 @@ def _read(a, ua, b, ub):
         {"field": "paper_b", "raw": b * 100, "value": b, "uncertainty": ub, "how": "curve b at the last tick"}]}
 
 
-async def test_figure_numbers_are_read_twice_and_widen_the_tolerance():
+async def test_figure_numbers_are_read_twice_and_a_tie_break_decides():
     fx = _base()
     fx["lead"]["claims"][1].update(source="figure", figure="Fig. 2 (page 6): curves m and b at the end", paper_a=0.9)
     fx["figure:c2"] = _read(0.40, 0.02, 0.30, 0.02)
     fx["figure-check:c2"] = _read(0.60, 0.03, 0.30, 0.02)         # the two readings of a disagree
+    fx["figure:c2#2"] = _read(0.99, 0.05, 0.30, 0.02)             # a third opinion, also an outlier
     r, be = await _run(fx)
     assert {"figure:c2", "figure-check:c2"} <= set(be.calls) and be.calls.index("figure:c2") < be.calls.index("lead#2")
     assert "0.9" not in be.prompts["figure:c2"]                     # the readers do not see the lead's number
+    assert "figure:c2#2" in be.calls                                # the disagreement triggered a tie-break read
     row = r["claims"][1]
-    assert row["paper"].endswith("(tol 20%)")                       # paper_a 0.5 +- 0.1: 20% tolerance
+    assert row["paper"].endswith("(tol 20%)")                       # 0.99 dropped, paper_a 0.5 +- 0.1
     assert "0.5 ± 0.1" in r["caps_md"] and "readings disagree" in r["caps_md"]
+    assert "out of the metric's range dropped (0.99)" in r["caps_md"]
     assert [x["field"] for x in r["figure_reads"]] == ["paper_a", "paper_b"]
+
+
+async def test_a_reading_outside_the_metric_range_is_not_averaged_in():
+    """d-mask-ar1, 2026-11-07: a metric that reads `1 - d_Jac` (=1) and a reader that reported the raw weight -0.39."""
+    fx = _base()
+    fx["lead"]["claims"][0].update(source="figure", figure="Fig. 1 (page 3), panel a", paper_value=1)
+    one = {"claim_id": "c1", "page": 3, "notes": "", "readings": [
+        {"field": "paper_value", "raw": 1, "value": 1.0, "uncertainty": 0.0, "how": "masks match at 1e-1"}]}
+    wrong = {"claim_id": "c1", "page": 3, "notes": "the panel prints weights, not the metric", "readings": [
+        {"field": "paper_value", "raw": -0.39, "value": -0.39, "uncertainty": 0.005, "how": "the printed cell"}]}
+    fx["figure:c1"], fx["figure-check:c1"] = one, wrong
+    r, be = await _run(fx)
+    row = r["claims"][0]
+    assert row["paper"] == "1"                                      # not the old 0.305 +- 0.7
+    assert "readings disagree" not in r["caps_md"]                  # one usable reading is not a disagreement
+    assert "out of the metric's range dropped (-0.39)" in r["caps_md"]
+    assert "figure:c1#2" not in be.calls                            # nothing to tie-break: the bad read is dropped
 
 
 async def test_a_binding_limit_goes_to_the_lead_with_its_evidence():
