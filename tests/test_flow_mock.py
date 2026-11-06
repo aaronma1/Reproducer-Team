@@ -495,6 +495,11 @@ async def test_the_shape_check_reads_the_run_files_when_it_can_see_them(tmp_path
     seed.write_text('{"arm": "m", "config": {"lr": 0.001}, "metrics": {"acc": 0.5}}')
     _, be2 = await _run(_base_with_one_run_file(fx), {"root": str(tmp_path)})
     assert "reported run files are missing" not in be2.prompts["builder:main#2"]  # the file is there and parses
+    fx3 = _base()
+    fx3["builder:main"] = {**fx3["builder:main"], "run_files": ["~/data/.gpu_runner/j1/runs/seed0.json"]}
+    fx3["builder:main#2"] = _base()["builder:main"]
+    _, be3 = await _run(fx3, {"root": str(tmp_path)})
+    assert "outside the run root" in be3.prompts["builder:main#2"]  # a job-side path is not counted as work
 
 
 def _base_with_one_run_file(fx):

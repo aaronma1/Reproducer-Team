@@ -513,9 +513,13 @@ def build_shape_problems(built, exp):
     root = _HOST["root"]
     if not root:  # headless runs keep this open: the flow has no path to the workers' tree
         return []
-    bad, parsed = [], []
+    root_abs, outside, bad, parsed = os.path.abspath(root), [], [], []
     for f in [f for f in files if f.rstrip().endswith(".json")]:  # the run format is one JSON per run
-        path = os.path.expanduser(f if os.path.isabs(f) else os.path.join(root, f))
+        f = os.path.expanduser(f)
+        path = os.path.abspath(f if os.path.isabs(f) else os.path.join(root, f))
+        if not path.startswith(root_abs + os.sep):  # a job-side path the flow cannot read is not evidence of work
+            outside.append(f)
+            continue
         try:
             with open(path, encoding="utf-8") as fh:
                 doc = json.load(fh)
@@ -530,6 +534,11 @@ def build_shape_problems(built, exp):
         else:
             parsed.append(doc)
     out = []
+    if outside:
+        out.append({"issue": f"{len(outside)} run file(s) are reported outside the run root",
+                    "evidence": "; ".join(outside[:4]),
+                    "action": f"download them under {root} in the run format and report those paths",
+                    "blocking": True, "key": "outside-run-files", "owner": "builder"})
     if bad:
         out.append({"issue": f"{len(bad)} of {len(parsed) + len(bad)} reported run files are missing or unreadable",
                     "evidence": "; ".join(bad[:6]), "action": "report only files that exist, in the run format",

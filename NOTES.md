@@ -394,3 +394,16 @@ ssh downloads hung with no keepalive; gpu.py now sets ServerAliveInterval.
   is rejected mechanically before the results are believed. It is skipped when the flow cannot see the run root
   (headless), and only what a builder can always satisfy blocks - coverage mismatches are logged, not blocking,
   because a mechanical check that cannot be satisfied is the trap this change exists to remove.
+
+- Limit gate escape hatch (2026-11-07): a limit the paper does not state that binds past `LIMIT_TOL` (1%) used to be a
+  permanent builder loop. e3's `steps_budget` cut 90.5% of what it applied to, e2's beta floor 47% and its alpha*beta
+  band 83%, and "raise or remove it and re-run" is not something a builder can do when the GPU budget is what set the
+  limit. Now: `LIMIT` may declare `guard: true` (a deliberate safety bound, tolerated up to `GUARD_TOL` 10% and still
+  reported), and any limit that binds past its tolerance is owned by `spec`, so it goes to the lead with its evidence.
+  The lead either says "raise it" (the builder can act) or `source: "decision"` accepts the narrowing, which records
+  it in `lead_decisions`, prints it in the report, and stops the same limit blocking again. A reported run file
+  outside the run root is also a builder-fixable issue now, instead of a "not found" that cannot be acted on.
+- A stopped run reports (2026-11-07): `_stop` returned `claims: []` and no `report.md`, so a stop left nothing behind
+  (the 2026-11-06 run ended after twenty hours with an empty answer). It now writes `report.md` under the run root with
+  the reason, one row per experiment (full runs yes/no, review open, rounds, open findings) and the lead's decisions,
+  and returns the same text as `report`. There is no agent to ask at that point, so the flow writes it itself.

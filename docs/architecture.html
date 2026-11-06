@@ -382,6 +382,9 @@ A run that did not finish has no file.</pre>
     <li>A review issue with <code>owner: "spec"</code>: the same turn answers it and may patch <code>acceptance</code>, <code>procedure</code>, <code>arms</code> or <code>open_choices</code>; the round is <b>not</b> spent, up to <code>max_spec_fixes</code> (2).</li>
     <li>An answer with <code>source: "decision"</code> is appended to <code>open_choices</code> (<code>basis: "lead"</code>) and printed in the report.</li>
     <li>A builder-owned blocking guess with a measured <code>sensitivity_pct</code> ≤ 5%: a <b>note</b>, not a blocker.</li>
+    <li>A limit the paper does not state that binds past 1% (10% when declared <code>guard</code>): owned by <code>spec</code>, so the lead decides — accept the narrowing (recorded) or raise it.</li>
+    <li>A run file reported outside the run root: <b>sent back</b>; the flow only counts what it can read.</li>
+    <li>The run stops before a verdict: <code>report.md</code> is still written, with every open finding.</li>
   </ul></div>
   <div class="card gate"><h4>Flow: results</h4><ul>
     <li>Review open after the last round: cap partial.</li>
