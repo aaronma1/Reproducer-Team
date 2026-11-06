@@ -263,6 +263,11 @@ def tuning_section(rows):
 
 # ============================================================ checks/repairs ==
 
+def _norm(key):
+    """A comparable form of a ledger key (issue keys come back from a model with stray case and spaces)."""
+    return str(key or "").strip().lower()
+
+
 def _slugify(name):
     return re.sub(r"[^a-z0-9_-]+", "-", str(name).lower()).strip("-_") or "x"
 
@@ -456,24 +461,38 @@ def blocking(review):
     return [_issue(i) for i in review.get("issues") or [] if i.get("blocking") and not measured_immaterial(i)]
 
 
-def build_problems(built):
+def limit_key(name):
+    return _norm(f"limit:{name}")
+
+
+def build_problems(built, accepted=()):
     """Blocking issues found mechanically in a build answer: an unmeasured or binding limit the paper does not
-    state, and a change made to move a number toward the paper's that was not compared with the faithful setting."""
-    out = []
+    state, and a change made to move a number toward the paper's that was not compared with the faithful setting.
+    `accepted` holds the keys of limit issues the lead has already ruled on (a narrowing it decided to live with), so
+    an accepted limit stops blocking and shows up in the report instead of looping through the builder forever.
+    A limit that binds past its tolerance is a scope decision, not a code defect: it is owned by `spec`, which routes
+    it to the lead, because a builder told to "raise it" by a compute budget it does not control can only spin."""
+    out, accepted = [], {_norm(a) for a in accepted}
     for lim in built.get("limits") or []:
-        if lim.get("stated_by_paper"):
+        name = str(lim.get("name"))
+        key = limit_key(name)
+        if lim.get("stated_by_paper") or key in accepted:
             continue
         frac = lim.get("bound_fraction")
+        tol = GUARD_TOL if lim.get("guard") else LIMIT_TOL
         if frac is None:
-            out.append({"issue": f"limit {lim.get('name')!r} ({lim.get('value')}) is not stated by the paper and its "
-                                 f"bind rate was not measured", "evidence": lim.get("evidence") or "",
-                        "action": "record in every run file how often it cut an episode/step/sample", "blocking": True})
-        elif frac > LIMIT_TOL:
-            out.append({"issue": f"limit {lim.get('name')!r} ({lim.get('value')}) is not stated by the paper and cut "
-                                 f"{frac:.1%} of what it applies to (allowed {LIMIT_TOL:.0%})",
+            out.append({"issue": f"limit {name!r} ({lim.get('value')}) is not stated by the paper and its bind rate "
+                                 f"was not measured", "evidence": lim.get("evidence") or "",
+                        "action": "record in every run file how often it cut an episode/step/sample", "blocking": True,
+                        "key": key, "owner": "builder"})
+        elif frac > tol:
+            out.append({"issue": f"limit {name!r} ({lim.get('value')}) is not stated by the paper and cut {frac:.1%} "
+                                 f"of what it applies to (allowed {tol:.0%}"
+                                 f"{', as a guard' if lim.get('guard') else ''})",
                         "evidence": lim.get("evidence") or "",
-                        "action": "raise or remove it and re-run what it affected; results under it are not valid",
-                        "blocking": True})
+                        "action": "raise or remove it and re-run what it affected; if the compute budget cannot cover "
+                                  "that, the lead decides whether to narrow the experiment and record it",
+                        "blocking": True, "key": key, "owner": "spec"})
     for ch in built.get("changes") or []:
         if ch.get("reason") == "result" and not ch.get("tested"):
             out.append({"issue": f"change {ch.get('change')!r} was made to move a result toward the paper's but was "
@@ -494,9 +513,13 @@ def build_shape_problems(built, exp):
     root = _HOST["root"]
     if not root:  # headless runs keep this open: the flow has no path to the workers' tree
         return []
-    bad, parsed = [], []
+    root_abs, outside, bad, parsed = os.path.abspath(root), [], [], []
     for f in [f for f in files if f.rstrip().endswith(".json")]:  # the run format is one JSON per run
-        path = os.path.expanduser(f if os.path.isabs(f) else os.path.join(root, f))
+        f = os.path.expanduser(f)
+        path = os.path.abspath(f if os.path.isabs(f) else os.path.join(root, f))
+        if not path.startswith(root_abs + os.sep):  # a job-side path the flow cannot read is not evidence of work
+            outside.append(f)
+            continue
         try:
             with open(path, encoding="utf-8") as fh:
                 doc = json.load(fh)
@@ -511,6 +534,11 @@ def build_shape_problems(built, exp):
         else:
             parsed.append(doc)
     out = []
+    if outside:
+        out.append({"issue": f"{len(outside)} run file(s) are reported outside the run root",
+                    "evidence": "; ".join(outside[:4]),
+                    "action": f"download them under {root} in the run format and report those paths",
+                    "blocking": True, "key": "outside-run-files", "owner": "builder"})
     if bad:
         out.append({"issue": f"{len(bad)} of {len(parsed) + len(bad)} reported run files are missing or unreadable",
                     "evidence": "; ".join(bad[:6]), "action": "report only files that exist, in the run format",
@@ -603,7 +631,10 @@ CHOICE_SOURCES = ["paper", "reference", "measured", "guess"]
 CHOICE = obj({"choice": S, "value": S, "source": {"enum": CHOICE_SOURCES}, "where": S})
 # Every cap, clip, budget or truncation in the code, and the largest fraction of episodes/steps/samples it cut in any
 # run file (null if not measured).
-LIMIT = obj({"name": S, "value": S, "stated_by_paper": B, "bound_fraction": N, "evidence": S})
+# `guard` marks a deliberate safety bound set far above what the run needs (BUILD_RULES allows those). A guard may
+# cut a little; past GUARD_TOL it is not a guard but a narrowing of the experiment, which is the lead's call.
+LIMIT = obj({"name": S, "value": S, "stated_by_paper": B, "bound_fraction": N, "evidence": S, "guard": B},
+            ["name", "value", "stated_by_paper", "bound_fraction", "evidence"])
 # Every setting changed since the builder's previous report, and why.
 CHANGE_REASONS = ["paper", "reference", "bug", "result"]
 CHANGE = obj({"change": S, "reason": {"enum": CHANGE_REASONS}, "tested": B, "evidence": S})
@@ -622,6 +653,7 @@ _PATCH = {"acceptance": arr(S), "procedure": S, "arms": arr(obj({"name": S, "des
 CONF = obj({"answers": arr(obj(_ANSWER, ["key", "answer", "source"])),
             "spec_patch": obj(_PATCH, []), "notes": S}, ["answers"])
 LIMIT_TOL = 0.01  # a limit the paper does not state may cut at most this fraction of episodes/steps/samples
+GUARD_TOL = 0.10  # a declared safety guard may cut this much; more than this narrows the experiment itself
 _ITEM = {"value": N, "a": CI, "b": CI, "diff": CI}
 _REQ = ["value", "a", "b"]
 RESULTS = obj({"results": arr(obj({"claim_id": S, **_ITEM, "sources": arr(S)}, ["claim_id", *_REQ, "sources"]))})
@@ -809,9 +841,49 @@ def _result_fields(c, metric):
     return f"{c['id']} ({c['kind']}, metric `{metric}`): `value` = the mean over seeds; `a`, `b`, `diff` null"
 
 
-def _stop(reason, **extra):
-    return {"verdict": "could_not_test", "reason": reason, "claims": [], "table": "", "caps": [],
-            "caps_md": f"Stopped: {reason}\n", **extra}
+def _write_report(md):
+    """Write report.md under the run root. The reporter agent writes it on a finished run; on a stopped run there is no
+    agent left to ask, so the flow writes what it knows."""
+    root = _HOST["root"]
+    if not root:
+        return ""
+    path = os.path.join(root, "report.md")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(md)
+        return path
+    except OSError as e:  # a stopped run must not fail on the way out
+        log(f"could not write {path}: {e}")
+        return ""
+
+
+def _stop(reason, states=None, **extra):
+    """A stopped run still explains itself. 2026-11-06: twenty hours of Build ended with an empty answer because a
+    stop produced no artifact at all - the open findings existed only in the workflow state."""
+    rows = states or []
+    md = [f"# Reproduction stopped: {reason}", "",
+          "No verdict was reached: the workflow stopped before the results were evaluated.", ""]
+    if rows:
+        md += ["## Experiments", "",
+               "| Experiment | Full runs | Review | Rounds | Open findings |", "|---|---|---|---|---|"]
+        md += [f"| {s.get('experiment')} | {'yes' if s.get('ran') else 'no'} | "
+               f"{'passed' if s.get('reviewed') else 'open'} | {s.get('rounds', 0)} | "
+               f"{'; '.join(s.get('open') or []) or '-'} |" for s in rows]
+        md += ["", "The code and the run files the builders wrote are under `repo/`: one JSON per seed per arm."]
+        dec = [d for s in rows for d in (s.get("decisions") or [])]
+        if dec:
+            md += ["", "## Decisions taken during the build", "", "| Item | Answer | Source |", "|---|---|---|"]
+            md += [f"| {d.get('key')} | {str(d.get('answer', '')).replace('|', '/')} | {d.get('source')} |"
+                   for d in dec]
+    body = "\n".join(md) + "\n"
+    path = _write_report(body)
+    if path:
+        log(f"stopped report: {path}")
+    out = {"verdict": "could_not_test", "reason": reason, "claims": [], "table": "", "caps": [],
+           "caps_md": f"Stopped: {reason}\n", "report": body, **extra}
+    if rows and "experiments" not in out:
+        out["experiments"] = rows
+    return out
 
 
 # ===================================================================== steps ==
@@ -1083,7 +1155,7 @@ async def build_experiment(args, exp, claims, lead):
               f"question in `questions` with what you already checked instead of guessing: the lead answers in one "
               f"turn.\nWrite the run files in this format:\n{fmt}\n\nExperiment:\n{_j(brief)}")
     stage, open_issues, record = None, ["never reviewed"], {}
-    decisions, used, fixes, asked, reviews, turns = [], 0, 0, 0, 0, 0
+    decisions, accepted, used, fixes, asked, reviews, turns = [], [], 0, 0, 0, 0, 0
     # `used` counts reviews only: a turn that asks or that triggers a spec patch is not a review round. `turns` is a
     # hard stop so an experiment whose lead never resolves anything still ends.
     while used < rounds and turns < rounds + max_questions + max_fixes + 3:
@@ -1109,7 +1181,7 @@ async def build_experiment(args, exp, claims, lead):
             prompt = (answer_text(answers, []) + f"\nGo on with the build.\nExperiment:\n{_j(brief)}\n"
                       f"Write the run files in this format:\n{fmt}")
             continue
-        auto = build_problems(built) + build_shape_problems(built, exp)
+        auto = build_problems(built, accepted) + build_shape_problems(built, exp)
         for i in auto:
             log(f"{eid}: build check: {i['issue']}")
         reviews += 1
@@ -1134,6 +1206,7 @@ async def build_experiment(args, exp, claims, lead):
                       "detail": i.get("evidence", ""), "impact": i.get("action", "")} for i in spec_issues]
             exp, answers, applied = await confer(args, lead, exp, claims, items, len(decisions) + 1)
             decisions += [{**a, "experiment": eid} for a in answers]
+            accepted += [a["key"] for a in answers if a.get("source") == "decision"]  # ruled on: stop re-blocking
             brief = {**exp, "claims": [c for c in claims if c["id"] in {x["claim_id"] for x in exp["claims"]}]}
             prompt = (answer_text(answers, applied) + f"\nReport again at stage `{stage}`, against this experiment:"
                       f"\n{_j(brief)}")
@@ -1306,7 +1379,7 @@ async def run(args):
     if args.get("smoke"):
         caps.append({"experiment": None, "ceiling": "partial", "reason": "smoke test: reduced scope"})
     if not any(s["ran"] for s in states):
-        return _stop("no experiment finished its runs", experiments=states)
+        return _stop("no experiment finished its runs", states=states)
 
     phase("Evaluate")
     results = await evaluate(args, exps, by_id, "repo/arms")

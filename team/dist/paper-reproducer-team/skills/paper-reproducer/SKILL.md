@@ -39,7 +39,8 @@ args (JSON): `{"root": "<run dir>", "compute": "auto", "experts": true}` plus op
 - `models`: workers run on `strong` and checkers on `cheap`, so no agent checks its own model's work. Give two
   different models from the team's model pool; leave it out and every role uses the default model.
 
-The final result (and `report.md` in the run directory) has the verdict table, caps, and every deviation.
+The final result (and `report.md` in the run directory) has the verdict table, caps, and every deviation. A run
+that stops before a verdict still writes `report.md`, with each experiment's open findings.
 
 ## Files
 
