@@ -51,6 +51,7 @@ async def _run(fx, args=None, journal=None):
 async def test_reproduced():
     r, be = await _run(_base())
     assert r["verdict"] == "reproduced"
+    assert "Decisions the lead took" not in be.judge_prompt          # nothing was decided: no empty section
     assert [x["verdict"] for x in r["claims"]] == ["reproduced", "reproduced"]
     assert be.calls[:6] == ["lead", "lead#2", "builder:main", "reviewer:main", "builder:main#2", "reviewer:main#2"]
     assert be.calls.index("evaluator") < be.calls.index("audit:c1") < be.calls.index("judge") < be.calls.index("reporter")
@@ -496,10 +497,12 @@ async def test_a_lead_decision_stays_visible_in_the_report():
     fx["builder:main#3"] = _base()["builder:main#2"]
     fx["lead:conf:main"] = {"answers": [{"key": "d-width", "answer": "use width 64; it does not move the claim",
                                          "source": "decision"}]}
-    r, _ = await _run(fx)
+    r, be = await _run(fx)
+    _judge_prompt = be.judge_prompt
     assert r["lead_decisions"][0]["source"] == "decision"
     assert "Decisions taken during the build: main" in r["caps_md"]
     assert "use width 64; it does not move the claim" in r["caps_md"]
+    assert "Decisions the lead took during the build" in _judge_prompt  # the judge sees the ruling, not just the report
 
 
 async def test_the_shape_check_reads_the_run_files_when_it_can_see_them(tmp_path):
@@ -526,3 +529,36 @@ def _base_with_one_run_file(fx):
     out = dict(fx)
     out["builder:main"] = {**out["builder:main"], "run_files": ["repo/arms/main/runs/m/seed0.json"]}
     return out
+
+
+# --- L1: the builder submits and ends its turn; the flow waits (2026-11-07) -------------------------------------
+
+async def test_a_submitted_job_is_waited_on_by_the_flow_not_the_builder(tmp_path):
+    fx = _base()
+    fx["builder:main"] = {**fx["builder:main"], "stage": "submitted", "run_files": []}
+    fx["watch:j1"] = {"job_uuid": "j1", "status": "COMPLETED", "exit_code": 0,
+                      "tail": "wrote runs/m/seed0.json", "done": True}
+    fx["builder:main#2"] = _base()["builder:main"]
+    fx["builder:main#3"] = _base()["builder:main#2"]
+    seed = tmp_path / "repo" / "arms" / "main" / "runs" / "m" / "seed0.json"
+    seed.parent.mkdir(parents=True)
+    seed.write_text('{"arm": "m", "config": {}, "metrics": {"acc": 0.5}}')  # what the job wrote
+    r, be = await _run(fx, {"root": str(tmp_path)})
+    assert "END YOUR TURN" in be.prompts["builder:main"]                    # told to hand the wait over
+    assert be.calls.index("watch:j1") < be.calls.index("reviewer:main")     # a submission is not reviewed
+    assert "wrote runs/m/seed0.json" in be.prompts["builder:main#2"]        # woken with the job's tail
+    assert "j1" in (tmp_path / "jobs.json").read_text()                     # the handle is on disk for a resume
+    assert r["verdict"] == "reproduced"
+    assert r["experiments"][0]["rounds"] == 2                               # the wait cost no review round
+
+
+async def test_a_job_that_never_finishes_is_given_back_to_the_builder():
+    fx = _base()
+    fx["builder:main"] = {**fx["builder:main"], "stage": "submitted", "run_files": []}
+    for n in ("", "#2"):
+        fx[f"watch:j1{n}"] = {"job_uuid": "j1", "status": "QUEUED", "exit_code": None, "tail": "", "done": False}
+    fx["builder:main#2"] = _base()["builder:main"]
+    _, be = await _run(fx, {"job_waits": 2})
+    assert be.calls.count("watch:j1") == 1 and be.calls.count("watch:j1#2") == 1   # two waits, then it stops
+    assert "is still QUEUED after 2 wait(s)" in be.prompts["builder:main#2"]
+    assert "do not resubmit it" in be.prompts["builder:main#2"]

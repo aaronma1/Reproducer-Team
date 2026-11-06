@@ -17,7 +17,7 @@ disagreement caps the claim. The rule verdicts are pure python; the judge agent 
 caps and the audits, and every departure from a rule verdict is shown. Prompts state goals, not procedures (2026-11-04).
 
 args: {"paper": str, "compute": "remote" | "local", "gpu_hours": 8, "max_tries": 3, "build_rounds": 5,
-       "max_questions": 2, "max_spec_fixes": 2,
+       "max_questions": 2, "max_spec_fixes": 2, "job_wait_s": 1800, "job_waits": 6,
        "tune": false, "tune_rounds": 4, "tune_trials": 4, "smoke": false, "max_claims": null, "spec_only": false,
        "models": {"cheap"?, "strong"?}, "root": null}
 
@@ -683,9 +683,13 @@ CHANGE = obj({"change": S, "reason": {"enum": CHANGE_REASONS}, "tested": B, "evi
 # paper answers is answered by reading, not by the lead.
 QUESTION = obj({"key": S, "question": S, "what_i_checked": S, "options": arr(S), "blocking": B, "impact_if_wrong": S},
                ["key", "question", "what_i_checked", "blocking"])
-_BUILD = {"stage": {"enum": ["pilot", "full", "failed"]}, "job_ids": arr(S), "run_files": arr(S), "notes": S,
+# `submitted` is an answer with job ids and no run files: the builder ends its turn there and the flow waits for
+# the job, which can sit in a shared queue for hours (2026-11-07).
+_BUILD = {"stage": {"enum": ["pilot", "full", "submitted", "failed"]}, "job_ids": arr(S), "run_files": arr(S), "notes": S,
           "choices": arr(CHOICE), "limits": arr(LIMIT), "changes": arr(CHANGE), "questions": arr(QUESTION)}
 BUILD = obj(_BUILD, [k for k in _BUILD if k != "questions"])  # questions are optional: most turns have none
+# A watcher's whole turn: wait on one job and say what happened. Nothing else.
+WATCH = obj({"job_uuid": S, "status": S, "exit_code": N, "tail": S, "done": B}, ["job_uuid", "status", "done"])
 # The lead's one answer turn. `source` says where an answer comes from: `paper`/`reference` (with a citation) answers
 # it; `decision` records a call the paper does not make, which the flow writes into the experiment's open choices.
 _ANSWER = {"key": S, "answer": S, "source": {"enum": ["paper", "reference", "decision"]}, "citation": S, "blocks": B}
@@ -740,7 +744,7 @@ def _example(x):
 
 # =================================================================== helpers ==
 
-ROLE_TIER = {"lead": "strong", "figure": "strong", "figure-check": "cheap", "builder": "strong", "reviewer": "cheap", "evaluator": "strong", "audit": "cheap",
+ROLE_TIER = {"lead": "strong", "figure": "strong", "figure-check": "cheap", "builder": "strong", "reviewer": "cheap", "watch": "cheap", "evaluator": "strong", "audit": "cheap",
              "tuner": "strong", "judge": "cheap", "reporter": "cheap"}
 
 
@@ -785,6 +789,16 @@ async def resolve_compute(args):
     ok = bool(probe and probe.get("available"))
     log(f"compute: {'remote (gpu_runner)' if ok else 'local'}: {(probe or {}).get('detail', 'probe gave no answer')}")
     return "remote" if ok else "local"
+
+
+def _watch_opts(args):
+    """The watcher's options: the cheap tier, and with `experts` the team member that holds the GPU tools (it only
+    waits here, so it needs `builder`'s access and nothing else)."""
+    model = (args.get("models") or {}).get("cheap")
+    opts = {"model": model} if model else {}
+    if args.get("experts"):
+        opts["agent_template"] = "builder"
+    return opts or None
 
 
 def _opts(args, role):
@@ -837,9 +851,14 @@ def _compute_note(args):
                 "there first. Put a pyproject.toml with pinned versions next to your code, submit the smallest "
                 "directory a job needs, batch seeds into as few jobs as possible (jobs run one at a time on a queue "
                 "shared with other teams), and " + ("download_job_files" if _HOST["root"] else "gpu_download")
-                + " each job's result files into your own directory. To make "
-                "sure a job ends, wrap its commands in a wall-clock `timeout`, which fails loudly, rather than adding "
-                "step caps inside the experiment, which silently change its results.")
+                + " each job's result files into your own directory. To make a job end, wrap its commands in a "
+                "wall-clock `timeout`, which fails loudly, rather than adding step caps inside the experiment, which "
+                "silently change its results.\n"
+                "Once you have submitted, report stage `submitted` with the `job_ids` and END YOUR TURN: the flow "
+                "waits for the job itself and wakes you with its last output. Do not call gpu_wait or gpu_output "
+                "yourself, and never resubmit a command that is still QUEUED - the queue is shared with other teams "
+                "and a queued job can take hours. If you must look at a job by hand, use one gpu_wait with "
+                "max_wait_s=1800, never a short poll loop.")
     if args.get("smoke"):
         note += (" SMOKE TEST: cut every experiment to at most 3 seeds and at most 2% of the paper's steps; every shell "
                  "command must finish within 60 seconds. Record the cut.")
@@ -1115,6 +1134,70 @@ def _exp_brief(exp):
                                 "open_choices") if k in exp}
 
 
+def _record_jobs(eid, jobs):
+    """Note the job ids of an experiment under the run root, so a resumed or restarted run can see what was already
+    submitted instead of submitting it again (2026-11-06: the same experiment was resubmitted 5-7 times)."""
+    root = _HOST["root"]
+    if not root:
+        return
+    path = os.path.join(root, "jobs.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh) or {}
+    except (OSError, ValueError):
+        data = {}
+    known = data.setdefault(eid, []) if isinstance(data, dict) else []
+    for j in jobs:
+        if j not in known:
+            known.append(j)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1, sort_keys=True)
+    except OSError:
+        pass
+
+
+async def watch_job(args, eid, job_uuid, n):
+    """One cheap turn that only waits: gpu_wait, then report. It submits nothing, cancels nothing, reads no files."""
+    per = int(float(args.get("job_wait_s") or 1800))
+    return await ask(
+        f"Wait for GPU job `{job_uuid}` of experiment `{eid}` and report it. Call gpu_wait with "
+        f"job_uuid={job_uuid} and max_wait_s={per}; if it returns still_running, call it again with the same arguments "
+        f"until it is done or you have waited about {per} s in total. Then call gpu_output with job_uuid={job_uuid} "
+        f"and tail_lines=25 and put that text in `tail`. Report `status` exactly as gpu_wait gives it (QUEUED, "
+        f"RUNNING, COMPLETED, FAILED, CANCELLED), `exit_code` (null when there is none) and `done` true only when the "
+        f"status is not QUEUED or RUNNING. Submit nothing, cancel nothing, read no files, run no commands.",
+        label=_try(f"watch:{job_uuid}", n), schema=WATCH, options=_watch_opts(args))
+
+
+async def wait_for_jobs(args, eid, jobs):
+    """(finished, text) after waiting on the submitted jobs. The wait is a few cheap watcher turns instead of a long
+    builder turn: a job queued for two hours costs four cheap calls here, not twenty-five strong ones (2026-11-07)."""
+    per, waits = int(float(args.get("job_wait_s") or 1800)), max(1, int(args.get("job_waits") or 6))
+    told = []
+    for uuid in jobs:
+        last = None
+        for n in range(1, waits + 1):
+            ans = await watch_job(args, eid, uuid, n)
+            if not ans:
+                log(f"{eid}: watch {uuid} gave no answer (wait {n}/{waits})")
+                continue
+            last = ans
+            if ans.get("done"):
+                tail = (ans.get("tail") or "").strip()[:2000]
+                told.append(f"{uuid} finished: {ans.get('status')}"
+                            + (f" (exit {ans['exit_code']})" if ans.get("exit_code") is not None else "")
+                            + (f"\nLast output:\n{tail}" if tail else ""))
+                log(f"{eid}: job {uuid} {ans.get('status')} after {n} wait(s)")
+                break
+            log(f"{eid}: job {uuid} still {ans.get('status')} (wait {n}/{waits})")
+        else:
+            state = (last or {}).get("status") or "unknown"
+            return False, (f"{uuid} is still {state} after {waits} wait(s) of {per} s. The queue is shared; do not "
+                           f"resubmit it. If it is stuck, cancel it and report `failed` with the reason.")
+    return True, "\n\n".join(told) or "the job reported no output"
+
+
 _LEAD_LOCK = asyncio.Lock()  # one lead session, several experiments: a conference turn never interleaves
 
 
@@ -1211,12 +1294,14 @@ async def build_experiment(args, exp, claims, lead):
               f"describes, run a short pilot first and report stage `pilot`; the full runs come after the pilot is "
               f"reviewed. {BUILD_RULES}\nIf you cannot go on without an answer the paper does not give, put the "
               f"question in `questions` with what you already checked instead of guessing: the lead answers in one "
-              f"turn.\nWrite the run files in this format:\n{fmt}\n\nExperiment:\n{_j(brief)}")
+              f"turn.\nAfter you submit a GPU job, report stage `submitted` with its `job_ids` and END YOUR TURN: the "
+              f"flow waits for the job and wakes you with its output.\nWrite the run files in this format:"
+              f"\n{fmt}\n\nExperiment:\n{_j(brief)}")
     stage, open_issues, record = None, ["never reviewed"], {}
     decisions, accepted, used, fixes, asked, reviews, turns = [], [], 0, 0, 0, 0, 0
     # `used` counts reviews only: a turn that asks or that triggers a spec patch is not a review round. `turns` is a
     # hard stop so an experiment whose lead never resolves anything still ends.
-    while used < rounds and turns < rounds + max_questions + max_fixes + 3:
+    while used < rounds and turns < 2 * rounds + max_questions + max_fixes + 3:
         turns += 1
         built = await builder.send(prompt, schema=BUILD)
         if not built or built["stage"] == "failed":
@@ -1225,6 +1310,20 @@ async def build_experiment(args, exp, claims, lead):
             continue
         stage = built["stage"]
         record = {"choices": built.get("choices") or [], "limits": built.get("limits") or []}
+        if stage == "submitted":
+            submitted = [str(j) for j in (built.get("job_ids") or [])]
+            if _local(args):
+                prompt = ("There is no GPU and no gpurun here. Run the experiment in your shell and report the run "
+                          "files.")
+                continue
+            if not submitted:
+                prompt = "You reported `submitted` with no `job_ids`. Submit the run and report its job ids."
+                continue
+            _record_jobs(eid, submitted)
+            finished, text = await wait_for_jobs(args, eid, submitted)
+            prompt = (text + ("\nDownload the run files and report the stage you reached."
+                              if finished else "\nReport what you have now.") + f"\nExperiment:\n{_j(brief)}")
+            continue
         open_q = [q for q in (built.get("questions") or []) if q.get("blocking")]
         if open_q and asked >= max_questions:
             log(f"{eid}: {len(open_q)} question(s) left unanswered: the {max_questions}-question budget is spent")
@@ -1353,8 +1452,13 @@ async def tune(args, exps, short, blind):
     return best, used
 
 
-async def final_verdicts(args, claims, exps, rows, audits, caps):
+async def final_verdicts(args, claims, exps, rows, audits, caps, decisions=()):
+    """Verdicts from the judge, with the lead's build-time decisions as evidence: a decision never turns a failed
+    measurement into `reproduced`, but it is what justifies `could_not_test` when the protocol cannot identify the
+    claim (2026-11-07: the lead ruled four level claims untestable for a paper-side inconsistency and the judge, which
+    never saw that ruling, would have judged them on the raw numbers anyway)."""
     ids = [r["id"] for r in rows]
+    decided = [d for d in decisions or [] if d.get("experiment") in {r["experiment"] for r in rows}]
     prompt = (
         "You are the final judge. Set each claim's final verdict: reproduced, partial, not_reproduced or "
         "could_not_test. Read paper.pdf and scope.txt, and check the run files in repo/ as far as you need. The rule "
@@ -1362,8 +1466,14 @@ async def final_verdicts(args, claims, exps, rows, audits, caps):
         "you depart from a rule verdict or a cap, say exactly why, citing a file or a number. Judge what was "
         "measured. A large gap in 'scale' means the setup may differ from the paper's; the paper's method doing "
         "better than the paper (a `method` claim, or an ordering's better arm) still reproduces it. A row with `tuned` was matched "
-        "after a hyperparameter search, which the user allows: it may be `reproduced` if its audited numbers match.\n\n"
+        "after a hyperparameter search, which the user allows: it may be `reproduced` if its audited numbers match. A "
+        "lead's decision can justify `could_not_test` when the protocol cannot identify a claim, and it never turns a "
+        "failed measurement into `reproduced`.\n\n"
         "Rule results (JSON):\n" + json.dumps(rows, sort_keys=True) + "\nEnd of rule results.\n\nCaps:\n" + _j(caps)
+        + (("\n\nDecisions the lead took during the build (its call, not the paper's - say in `reason` which one you "
+            "used):\n" + _j([{"experiment": d.get("experiment"), "key": d.get("key"), "answer": d.get("answer"),
+                                "source": d.get("source"), "citation": d.get("citation")} for d in decided]))
+           if decided else "")
         + "\n\nClaims:\n" + _j([c for c in claims if c["id"] in ids]) + "\nExperiments:\n" + _j(exps)
         + "\nAudits:\n" + _j({i: audits.get(i) for i in ids}))
     sess = _Turns("judge", options=_opts(args, "judge"))
@@ -1483,7 +1593,8 @@ async def run(args):
         rows.append({"id": cid, "experiment": exp_of[cid], "paper": paper if isinstance(paper, str) else _fmt(paper),
                      "measured": _measured(c, res), "verdict": v, "caps": [x["reason"] for x in mine],
                      "scale": scale_note(c, res), **({"tuned": tuned_row, "tuned_match": match} if tuned_row else {})})
-    verdicts = await final_verdicts(args, claims, exps, rows, audits, caps)
+    verdicts = await final_verdicts(args, claims, exps, rows, audits, caps,
+                                    [d for s in states for d in s.get("decisions") or []])
     for r in rows:
         r["rule_verdict"] = r["verdict"]
         if verdicts and r["id"] in verdicts:

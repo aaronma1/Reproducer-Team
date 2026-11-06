@@ -417,3 +417,21 @@ ssh downloads hung with no keepalive; gpu.py now sets ServerAliveInterval.
   from the median is dropped. The figure prompt now says a derived metric must be computed and reported in its own
   units, and that a figure that does not print what the metric needs gets `null`, not a nearby number. Widening the
   tolerance was never making the number more accurate: at 70% every measurement matched.
+- Waiting for the GPU moved out of the builder's turn (2026-11-07, L1): the wait was never the GPU's problem - a
+  builder submitted a job, then held its turn open with `gpu_wait` calls of 240-295 s so that it would have something
+  to report. 248 such calls in the 20-hour run, ~25 strong-model calls per job, and one turn of 16.6 h. Now the build
+  answer has `stage: "submitted"`: the builder submits, reports the `job_ids` and ends its turn; the flow waits with a
+  `watch` role on the cheap tier (one `gpu_wait` of up to `job_wait_s` = 1800, then `gpu_output`, then submit) and
+  wakes the same builder session with the job's tail. `job_waits` (6) bounds the wait per job, after which the job is
+  handed back to the builder with "still QUEUED after N waits - do not resubmit" so a stuck queue becomes a decision
+  rather than a hang. The job ids are written to `jobs.json` under the run root, so a resumed run can see what was
+  already submitted (the old run resubmitted the same experiment 5-7 times). A submission is not reviewed and costs no
+  `build_rounds` round. With `experts: true` the watcher borrows the `builder` member's template, because that is
+  where the GPU tools live.
+
+- The judge sees the lead's decisions (2026-11-07): `final_verdicts` took rows, caps, claims, experiments and audits,
+  but not the decisions the build conference produced, so a lead ruling of "this claim cannot be tested as stated"
+  reached the report and not the judge, which then judged the raw numbers on its own. The decisions of the built
+  experiments now go into the judge prompt, with the rule that a decision can justify `could_not_test` when the
+  protocol cannot identify a claim and never turns a failed measurement into `reproduced`. Seen live: the lead ruled
+  four level claims untestable (a paper-side inconsistency) while the run was building.
