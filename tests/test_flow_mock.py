@@ -564,3 +564,19 @@ async def test_a_job_that_never_finishes_is_given_back_to_the_builder():
     assert "max_wait_s=120" in be.prompts["watch:j1#2"]                         # and doubles
     assert "is still QUEUED after 180 s of waiting" in be.prompts["builder:main#2"]
     assert "do not resubmit it" in be.prompts["builder:main#2"]
+
+
+async def test_every_working_prompt_bounds_its_tool_output():
+    """2026-11-07: 400 tool results over 5 KB were 77% of the activity trail that overran the 6 MB progress budget."""
+    fx = _base()
+    fx["lead"]["claims"][1].update(source="figure", figure="Fig. 2 (page 6)", paper_a=0.9)
+    fx["figure:c2"] = _read(0.40, 0.02, 0.30, 0.02)
+    fx["figure-check:c2"] = _read(0.41, 0.02, 0.30, 0.02)          # they agree: no tie-break read
+    _, be = await _run(fx)
+    for label in ("lead", "builder:main", "reviewer:main", "figure:c2", "figure-check:c2",
+                  "evaluator", "audit:c1"):
+        assert "Keep every tool result small" in be.prompts[label], label
+    assert "Keep every tool result small" in be.judge_prompt
+    assert "instead of `tool_search`" in be.prompts["builder:main"]   # the catalogue is not re-fetched
+    assert "not its `curves` array" in be.prompts["reviewer:main"]     # told what to read, not just what not to
+    assert "a review that quotes no numbers is not a review" in be.prompts["reviewer:main"]

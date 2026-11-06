@@ -442,3 +442,12 @@ ssh downloads hung with no keepalive; gpu.py now sets ServerAliveInterval.
   `job_budget_s` (3 h per job): 60, 120, 240, 480, 960, 1800, 1800 ... so a crash is reported within a minute or two
   and a two-hour queue costs about a dozen cheap checks instead of fifty short polls. The elapsed time is summed from
   the waits the flow asked for, not read from a clock (the engine lints `time.monotonic` for resume determinism).
+
+- Bounded tool output (2026-11-07): the activity trail that overran the 6 MB progress budget was 77% four hundred tool
+  results over 5 KB (bash 1.64 MB, read_file 0.82, tool_search 0.42, glob 0.31 of a 4.24 MB preview total; the median
+  preview was 263 chars). The platform record keeps every tool result and re-sends the record whole, so the flow's only
+  lever is what the agents ask their tools for. `OUTPUT_RULES` now rides on every working prompt - lead, builder,
+  reviewer, both figure readers, evaluator, auditor, judge: tail/head/jq instead of dumping, `limit`/`offset`/`pages`
+  or `grep` instead of reading a file whole, a specific directory instead of `glob` on a run root, and the gpurun tools
+  by name instead of `tool_search` (which returned the whole catalogue 59 times, 0.42 MB). Expected effect on a run
+  like this one: the 3.2 MB oversized tail falls to roughly 0.6 MB.
