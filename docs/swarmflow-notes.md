@@ -12,15 +12,20 @@ Figures are in `swarmflow-notes/figs/`. The SwarmFlow charts are drawn from the 
 
 ## Best agent vs best cluster vs best SwarmFlow
 
-Agent = JiuwenSwarm agent mode, one deepseek-v4.1-flash agent. Cluster = JiuwenSwarm team mode, a leader with engineer and verifier members, deepseek-v4.1-flash. SwarmFlow = the scripted flow, deepseek-v4.1-flash-1017 for authors and glm-5.3-flash for most checkers. Agent and cluster numbers are from their runs under `../paper-reproducer/{agent,cluster}/`.
+### Results and cost
 
-### Verdicts
+Agent = JiuwenSwarm agent mode, one deepseek-v4.1-flash agent. Cluster = JiuwenSwarm team mode, a leader with engineer and verifier members, deepseek-v4.1-flash. SwarmFlow = the scripted flow, deepseek-v4.1-flash-1017 for authors and glm-5.3-flash for most checkers.
 
-| Paper | Agent | Cluster | SwarmFlow | Best |
-|---|---|---|---|---|
-| reppo-retrying | partial: RePPO behind PPO at the paper's settings | partial: baseline did not train (PPO 9.5 raw) | partial: **RePPO ahead of PPO by the paper's ratio**, capped only by an open review issue | **SwarmFlow**: only system to reproduce the finding |
-| edge-of-stability | reproduced (1 seed) | reproduced (1 seed) | **reproduced, 9/9 numeric claims within tolerance, 3 seeds, every number recomputed by an independent audit** | **SwarmFlow** on rigour; agent ran more side experiments |
-| lottery-ticket-small | reproduced, pruned to 33% only | reproduced, pruned to 33% only (accuracy result overclaimed) | **pruned to 1.9%, the paper's full range**: all orderings reproduce; after tuning, deep-pruning accuracy matches the paper | **SwarmFlow**: only system to test the paper's headline region |
+| Paper | | Agent | Cluster | SwarmFlow | Best |
+|---|---|---|---|---|---|
+| reppo-retrying | result | partial: RePPO behind PPO at the paper's settings | partial: baseline did not train (PPO 9.5 raw) | partial: **RePPO ahead of PPO by the paper's ratio**, capped only by an open review issue | **SwarmFlow**: only system to reproduce the finding |
+| | cost | 15.7M tok · $0.17 · 1.0 h | 48.5M tok · $1.09 · 1.7 h | 31.9M tok journaled (+~7.5M re-run) · ≈$0.82 · ≈8.5 h | — |
+| edge-of-stability | result | reproduced (1 seed) | reproduced (1 seed) | **reproduced, 9/9 numeric claims within tolerance, 3 seeds, every number recomputed by an independent audit** | **SwarmFlow** on rigour; agent ran more side experiments |
+| | cost | 10.0M tok · $0.21 · 0.6 h | 15.0M tok · $0.25 · 0.4 h | 23.2M tok · ≈$0.47 · 0.8 h | — |
+| lottery-ticket-small | result | reproduced, pruned to 33% only | reproduced, pruned to 33% only (accuracy result overclaimed) | **pruned to 1.9%, the paper's full range**: all orderings reproduce; after tuning, deep-pruning accuracy matches the paper | **SwarmFlow**: only system to test the paper's headline region |
+| | cost | 27.5M tok · $0.58 | 19.5M tok · $0.79 | 26.6M tok to audit (tuner still running) · ≈$0.55 so far | — |
+
+SwarmFlow dollars are estimated at the rates measured on the reppo run ($0.020 per million tokens for the strong model, $0.026 for the cheap one); the flow did not log dollars on these runs. Agent and cluster figures are summed from JiuwenSwarm's traces, from their runs under `../paper-reproducer/{agent,cluster}/`.
 
 ### Key numbers against the paper
 
@@ -41,17 +46,7 @@ Agent = JiuwenSwarm agent mode, one deepseek-v4.1-flash agent. Cluster = JiuwenS
 | lottery | early-stop speed-up over dense | 3.5× at 8.8% | 2.0× at 33% | 2.1× at 33% | 2.5× (floored by the 100-iteration log grid) |
 | lottery | ticket vs reinit early stop at 3.7% | ~1,000 vs ~13,500 | not tested | not tested | **1,500 vs 14,656** |
 
-### Cost and time
-
-| Paper | Agent | Cluster | SwarmFlow |
-|---|---|---|---|
-| reppo | 15.7M tok · $0.17 · 1.0 h | 48.5M tok · $1.09 · 1.7 h | 31.9M tok journaled (+~7.5M re-run) · ≈$0.82 · ≈8.5 h |
-| edge | 10.0M tok · $0.21 · 0.6 h | 15.0M tok · $0.25 · 0.4 h | **23.2M tok · ≈$0.47 · 0.8 h** |
-| lottery | 27.5M tok · $0.58 | 19.5M tok · $0.79 | 26.6M tok to audit (tuner still running) · ≈$0.55 so far |
-
-SwarmFlow dollars are estimated at the rates measured on the reppo run ($0.020 per million tokens for the strong model, $0.026 for the cheap one); the flow did not log dollars on these runs. Agent and cluster figures are summed from JiuwenSwarm's traces.
-
-### What the table says
+### What the tables say
 
 - **SwarmFlow is the only system that reproduced the reppo finding**, in the paper's own environment, with RePPO ahead of PPO by the paper's ratio and an independent audit that agrees with the computed numbers.
 - **On edge-of-stability it is the most rigorous result**: every claim is a number checked against a value read off the paper's figures by two independent figure agents, over 3 seeds, recomputed from the raw run files by a separate audit. It finished in 49 minutes with 0.06 GPU-hours of training.

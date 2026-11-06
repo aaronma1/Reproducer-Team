@@ -6,6 +6,8 @@ Writes <out>/paper-reproducer-team/ and <out>/paper-reproducer-team.zip (the fil
 manifest, one expert per role in team/roles.json (persona, the RunPolicyRail with that role's policy.json, the
 view_page tool), and the group-shared paper-reproducer skill with flows/reproducer_flow.py as its
 scripts/workflow.py. Every member gets its own copy of the shared files because a package may not contain symlinks.
+The package README.md (the team's description in JiuwenSwarm) is team/README.md with the "Results and cost" table
+from docs/swarmflow-notes.md inserted at the top.
 Then it checks the result against the rules JiuwenSwarm's publish step applies and zips it, with the package
 directory as the archive's single top-level entry.
 """
@@ -22,11 +24,29 @@ REPO = HERE.parent
 NAME = "paper-reproducer-team"
 SKILL = "paper-reproducer"
 MEMBER_RX = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+NOTES = REPO / "docs" / "swarmflow-notes.md"
+RESULTS_HEADING = "### Results and cost"
 
 
 def _write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def results_section() -> str:
+    """The merged results-and-cost table from docs/swarmflow-notes.md, from its heading up to the next heading."""
+    text = NOTES.read_text(encoding="utf-8")
+    start = text.index(RESULTS_HEADING) + len(RESULTS_HEADING)
+    end = text.find("\n#", start)
+    body = text[start:end if end >= 0 else None].strip()
+    assert "| Paper |" in body, f"{NOTES}: no table under {RESULTS_HEADING!r}"
+    return body
+
+
+def readme() -> str:
+    """team/README.md with the results table inserted right after its title, as the team's detail page shows it."""
+    title, _, rest = (HERE / "README.md").read_text(encoding="utf-8").partition("\n")
+    return f"{title}\n\n## Results so far\n\n{results_section()}\n\n{rest.lstrip()}"
 
 
 def build(out: Path) -> Path:
@@ -67,7 +87,7 @@ def build(out: Path) -> Path:
         "instruction": "Run the paper-reproducer skill with experts=true. The leader stages the paper and launches "
                        "the workflow; the script hands each step to the member of the same name.",
         "agents": list(roles), "skills": [SKILL]})
-    shutil.copy(HERE / "README.md", pkg / "README.md")
+    (pkg / "README.md").write_text(readme(), encoding="utf-8")  # JiuwenSwarm shows it as the team's description
     check(pkg)
     return pkg
 

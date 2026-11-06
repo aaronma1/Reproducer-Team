@@ -18,6 +18,7 @@ caps and the audits, and every departure from a rule verdict is shown. Prompts s
 
 args: {"paper": str, "compute": "remote" | "local", "gpu_hours": 8, "max_tries": 3, "build_rounds": 5,
        "max_questions": 2, "max_spec_fixes": 2,
+       "job_wait_start_s": 60, "job_wait_s": 1800, "job_budget_s": 10800,
        "tune": false, "tune_rounds": 4, "tune_trials": 4, "smoke": false, "max_claims": null, "spec_only": false,
        "models": {"cheap"?, "strong"?}, "root": null}
 
@@ -389,23 +390,59 @@ def needs_figure_read(claim):
         claim.get("source") is None and any("fig" in str(a).lower() for a in claim.get("anchors") or [])))
 
 
+def _field_reads(claim, field, reads):
+    """(usable readings, dropped values) for one field. A reading outside the metric's range is not a reading of it:
+    when the lead's own value is a fraction (0..1), a negative or far larger reading came from a different quantity
+    (2026-11-07, d-mask-ar1: one reader reported the raw weight -0.39 for a metric that reads `1 - d_Jac`, i.e. 1)."""
+    lead = claim.get(field)
+    bounded = isinstance(lead, (int, float)) and 0 <= lead <= 1
+    got, dropped = [], []
+    for read in reads:
+        for r in (read or {}).get("readings") or []:
+            if r.get("field") != field or r.get("value") is None:
+                continue
+            v = float(r["value"])
+            if bounded and not (-1e-6 <= v <= 1.5):
+                dropped.append(v)
+                continue
+            got.append((v, _unc(r)))
+    return got, dropped
+
+
+def reads_disagree(claim, reads):
+    """True when two usable readings of a field are further apart than their own uncertainties."""
+    for field in figure_fields(claim):
+        got, _ = _field_reads(claim, field, reads)
+        if len(got) >= 2 and abs(got[0][0] - got[1][0]) > got[0][1] + got[1][1] + 1e-12:
+            return True
+    return False
+
+
 def combine_reads(claim, reads):
     """(claim with its paper numbers set from the figure readings, one record per field). Two readings are averaged;
     the uncertainty is the larger reported one, or half their gap if that is larger, and it widens the claim's
     tolerance (a number read off a plot is only as exact as the reading). A field nobody read keeps the lead's value."""
     out, records = dict(claim), []
     for field in figure_fields(claim):
-        got = [(float(r["value"]), _unc(r)) for read in reads if read
-               for r in read.get("readings") or [] if r.get("field") == field]
-        rec = {"claim_id": claim["id"], "field": field, "lead": claim.get(field), "reads": got}
+        got, dropped = _field_reads(claim, field, reads)
+        rec = {"claim_id": claim["id"], "field": field, "lead": claim.get(field), "reads": got, "dropped": dropped}
         if not got:
-            records.append({**rec, "value": claim.get(field), "uncertainty": None, "agree": None})
+            records.append({**rec, "value": claim.get(field), "uncertainty": None, "agree": None,
+                            "note": (f"every reading was out of the metric's range ({', '.join(f'{d:g}' for d in dropped)});"
+                                     " kept the lead's value") if dropped else ""})
             continue
+        if len(got) >= 3:  # a tie-break read decides: drop the one farthest from the median
+            med = sorted(v for v, _ in got)[len(got) // 2]
+            k = max(range(len(got)), key=lambda i: abs(got[i][0] - med))
+            dropped.append(got[k][0])
+            got = [g for i, g in enumerate(got) if i != k]
         vals = [v for v, _ in got]
         value = sum(vals) / len(vals)
         gap = (max(vals) - min(vals)) / 2
-        unc = max([u for _, u in got] + [gap])
         agree = len(got) < 2 or abs(vals[0] - vals[1]) <= got[0][1] + got[1][1] + 1e-12
+        # The disagreement may widen the band, but never past MAX_READ_TOL: a gap that big is a wrong reading, not a
+        # wide reading, and a 70% band makes every measurement a match (2026-11-07, d-mask-ar1).
+        unc = max([u for _, u in got] + [min(gap, MAX_READ_TOL * abs(value))])
         trial = {**out, field: value}
         if unit_problems(trial):  # a reading in the wrong units is not used
             records.append({**rec, "value": claim.get(field), "uncertainty": None, "agree": False,
@@ -414,7 +451,11 @@ def combine_reads(claim, reads):
         out = trial
         if value:
             out["rel_tol"] = max(float(out.get("rel_tol") or 0.0), unc / abs(value))
-        records.append({**rec, "value": value, "uncertainty": unc, "agree": agree})
+        note = ""
+        if dropped:
+            note = (f"{len(dropped)} reading(s) out of the metric's range dropped "
+                    f"({', '.join(f'{d:g}' for d in dropped)})")
+        records.append({**rec, "value": value, "uncertainty": unc, "agree": agree, "note": note})
     return out, records
 
 
@@ -426,7 +467,8 @@ def figure_section(records):
         reads = ", ".join(f"{v:.4g} ± {u:.2g}" for v, u in r["reads"]) or "none"
         val = "kept the lead's value" if r["uncertainty"] is None else f"{r['value']:.4g} ± {r['uncertainty']:.2g}"
         out.append(f"- `{r['claim_id']}` {r['field']}: lead {r['lead']}, readings {reads} -> {val}"
-                   + ("" if r["agree"] in (True, None) else " (the readings disagree; tolerance widened to cover both)"))
+                   + ("" if r["agree"] in (True, None) else " (the readings disagree; tolerance widened to cover both)")
+                   + (f" ({r['note']})" if r.get("note") else ""))
     return "\n".join(out) + "\n"
 
 
@@ -642,9 +684,13 @@ CHANGE = obj({"change": S, "reason": {"enum": CHANGE_REASONS}, "tested": B, "evi
 # paper answers is answered by reading, not by the lead.
 QUESTION = obj({"key": S, "question": S, "what_i_checked": S, "options": arr(S), "blocking": B, "impact_if_wrong": S},
                ["key", "question", "what_i_checked", "blocking"])
-_BUILD = {"stage": {"enum": ["pilot", "full", "failed"]}, "job_ids": arr(S), "run_files": arr(S), "notes": S,
+# `submitted` is an answer with job ids and no run files: the builder ends its turn there and the flow waits for
+# the job, which can sit in a shared queue for hours (2026-11-07).
+_BUILD = {"stage": {"enum": ["pilot", "full", "submitted", "failed"]}, "job_ids": arr(S), "run_files": arr(S), "notes": S,
           "choices": arr(CHOICE), "limits": arr(LIMIT), "changes": arr(CHANGE), "questions": arr(QUESTION)}
 BUILD = obj(_BUILD, [k for k in _BUILD if k != "questions"])  # questions are optional: most turns have none
+# A watcher's whole turn: wait on one job and say what happened. Nothing else.
+WATCH = obj({"job_uuid": S, "status": S, "exit_code": N, "tail": S, "done": B}, ["job_uuid", "status", "done"])
 # The lead's one answer turn. `source` says where an answer comes from: `paper`/`reference` (with a citation) answers
 # it; `decision` records a call the paper does not make, which the flow writes into the experiment's open choices.
 _ANSWER = {"key": S, "answer": S, "source": {"enum": ["paper", "reference", "decision"]}, "citation": S, "blocks": B}
@@ -699,7 +745,7 @@ def _example(x):
 
 # =================================================================== helpers ==
 
-ROLE_TIER = {"lead": "strong", "figure": "strong", "figure-check": "cheap", "builder": "strong", "reviewer": "cheap", "evaluator": "strong", "audit": "cheap",
+ROLE_TIER = {"lead": "strong", "figure": "strong", "figure-check": "cheap", "builder": "strong", "reviewer": "cheap", "watch": "cheap", "evaluator": "strong", "audit": "cheap",
              "tuner": "strong", "judge": "cheap", "reporter": "cheap"}
 
 
@@ -744,6 +790,16 @@ async def resolve_compute(args):
     ok = bool(probe and probe.get("available"))
     log(f"compute: {'remote (gpu_runner)' if ok else 'local'}: {(probe or {}).get('detail', 'probe gave no answer')}")
     return "remote" if ok else "local"
+
+
+def _watch_opts(args):
+    """The watcher's options: the cheap tier, and with `experts` the team member that holds the GPU tools (it only
+    waits here, so it needs `builder`'s access and nothing else)."""
+    model = (args.get("models") or {}).get("cheap")
+    opts = {"model": model} if model else {}
+    if args.get("experts"):
+        opts["agent_template"] = "builder"
+    return opts or None
 
 
 def _opts(args, role):
@@ -796,9 +852,14 @@ def _compute_note(args):
                 "there first. Put a pyproject.toml with pinned versions next to your code, submit the smallest "
                 "directory a job needs, batch seeds into as few jobs as possible (jobs run one at a time on a queue "
                 "shared with other teams), and " + ("download_job_files" if _HOST["root"] else "gpu_download")
-                + " each job's result files into your own directory. To make "
-                "sure a job ends, wrap its commands in a wall-clock `timeout`, which fails loudly, rather than adding "
-                "step caps inside the experiment, which silently change its results.")
+                + " each job's result files into your own directory. To make a job end, wrap its commands in a "
+                "wall-clock `timeout`, which fails loudly, rather than adding step caps inside the experiment, which "
+                "silently change its results.\n"
+                "Once you have submitted, report stage `submitted` with the `job_ids` and END YOUR TURN: the flow "
+                "waits for the job itself and wakes you with its last output. Do not call gpu_wait or gpu_output "
+                "yourself, and never resubmit a command that is still QUEUED - the queue is shared with other teams "
+                "and a queued job can take hours. If you must look at a job by hand, use one gpu_wait with "
+                "max_wait_s=1800, never a short poll loop.")
     if args.get("smoke"):
         note += (" SMOKE TEST: cut every experiment to at most 3 seeds and at most 2% of the paper's steps; every shell "
                  "command must finish within 60 seconds. Record the cut.")
@@ -972,7 +1033,7 @@ async def read_figures(args, claims):
     if not todo:
         return claims, []
 
-    def read_one(c, role):
+    def read_one(c, role, n=1):
         fields = {"paper_value": "the number for the method in `text`",
                   "paper_a": f"the value of arm `{c.get('better')}`", "paper_b": f"the value of arm `{c.get('worse')}`"}
         return ask(
@@ -981,14 +1042,31 @@ async def read_figures(args, claims):
             f"curve where the claim says (e.g. the end of training), using the axis ticks. For each field give the raw "
             f"reading in the plot's units, the value in the claim's metric units (apply the normalization the paper "
             f"states, if the metric is normalized), and an honest uncertainty (half-width, in the metric's units) from "
-            f"the tick spacing, line width and any shaded band. Explain in `how` which curve and point you read.\n"
+            f"the tick spacing, line width and any shaded band. A derived metric (a mask similarity, a distance, a "
+            f"ratio, a difference) must be computed from the numbers you read and given in its own units: never report "
+            f"the raw quantity you read it from. If the figure does not print what the metric needs, send null for "
+            f"that field and say in `how` what is missing - a value outside the metric's range is worse than no value. "
+            f"Explain in `how` which curve and point you read.\n"
             f"Fields: {_j({k: fields[k] for k in figure_fields(c)})}\nWhere: {c.get('figure') or c.get('anchors')}\n"
             f"Claim:\n{_j(public_claim(c))}",
-            label=f"{role}:{c['id']}", schema=FIGREAD, options=_opts(args, role))
-    reads = await parallel([lambda c=c, role=role: read_one(c, role) for c in todo for role in ("figure", "figure-check")])
+            label=_try(f"{role}:{c['id']}", n), schema=FIGREAD, options=_opts(args, role))
+
+    reads = await parallel([lambda c=c, role=role: read_one(c, role) for c in todo
+                            for role in ("figure", "figure-check")])
+    per = {c["id"]: list(reads[2 * i:2 * i + 2]) for i, c in enumerate(todo)}
+    tie = [c for c in todo if reads_disagree(c, per[c["id"]])]
+    if tie:
+        # A third reading decides: two readings that disagree cannot say which one is wrong, and averaging them is
+        # how a 70% tolerance got written (2026-11-07). The tie-break is the strong tier, because the cheap check is
+        # the reader that most often reports the wrong quantity.
+        log(f"figure: {len(tie)} claim(s) with disagreeing readings, reading again: "
+            + ", ".join(c["id"] for c in tie))
+        extra = await parallel([lambda c=c: read_one(c, "figure", 2) for c in tie])
+        for c, r in zip(tie, extra):
+            per[c["id"]].append(r)
     out, records = {c["id"]: c for c in claims}, []
-    for i, c in enumerate(todo):
-        out[c["id"]], recs = combine_reads(c, reads[2 * i:2 * i + 2])
+    for c in todo:
+        out[c["id"]], recs = combine_reads(c, per[c["id"]])
         records += recs
     for r in records:
         if r["uncertainty"] is not None:
@@ -1055,6 +1133,84 @@ def _exp_brief(exp):
     """What builders, evaluators and auditors see of an experiment."""
     return {k: exp[k] for k in ("id", "arms", "procedure", "seeds", "seeds_reason", "metrics", "acceptance",
                                 "open_choices") if k in exp}
+
+
+def _record_jobs(eid, jobs):
+    """Note the job ids of an experiment under the run root, so a resumed or restarted run can see what was already
+    submitted instead of submitting it again (2026-11-06: the same experiment was resubmitted 5-7 times)."""
+    root = _HOST["root"]
+    if not root:
+        return
+    path = os.path.join(root, "jobs.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh) or {}
+    except (OSError, ValueError):
+        data = {}
+    known = data.setdefault(eid, []) if isinstance(data, dict) else []
+    for j in jobs:
+        if j not in known:
+            known.append(j)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1, sort_keys=True)
+    except OSError:
+        pass
+
+
+async def watch_job(args, eid, job_uuid, n, wait_s):
+    """One cheap turn that only waits: gpu_wait for `wait_s`, then report. It submits nothing, cancels nothing, reads
+    no files."""
+    per = int(wait_s)
+    return await ask(
+        f"Wait for GPU job `{job_uuid}` of experiment `{eid}` and report it. Call gpu_wait with "
+        f"job_uuid={job_uuid} and max_wait_s={per}; if it returns still_running, call it again with the same argument "
+        f"until it is done or about {per} s have passed. Then call gpu_output with job_uuid={job_uuid} "
+        f"and tail_lines=25 and put that text in `tail`. Report `status` exactly as gpu_wait gives it (QUEUED, "
+        f"RUNNING, COMPLETED, FAILED, CANCELLED), `exit_code` (null when there is none) and `done` true only when the "
+        f"status is not QUEUED or RUNNING. Submit nothing, cancel nothing, read no files, run no commands.",
+        label=_try(f"watch:{job_uuid}", n), schema=WATCH, options=_watch_opts(args))
+
+
+async def wait_for_jobs(args, eid, jobs):
+    """(finished, text) after waiting on the submitted jobs, with exponential backoff: `job_wait_start_s` (60 s),
+    doubled up to `job_wait_s` (1800 s), inside `job_budget_s` (3 h) per job.
+
+    Backoff is what gets both ends right: a job that dies after a minute is reported in a minute, a job queued for two
+    hours is looked at a dozen times rather than fifty, and each look is one cheap watcher turn instead of a strong
+    builder turn re-reading its context (2026-11-07)."""
+    cap = float(args.get("job_wait_s") or 1800)
+    start = min(float(args.get("job_wait_start_s") or 60), cap)
+    budget = float(args.get("job_budget_s") or 10800)
+    told = []
+    for uuid in jobs:
+        spent, wait, n, last = 0.0, start, 0, None
+        while spent < budget:
+            n += 1
+            step = min(wait, cap, budget - spent)
+            ans = await watch_job(args, eid, uuid, n, step)
+            spent += step
+            if not ans:
+                log(f"{eid}: watch {uuid} gave no answer (waited {int(spent)}s of {int(budget)}s)")
+                wait *= 2
+                continue
+            last = ans
+            if ans.get("done"):
+                tail = (ans.get("tail") or "").strip()[:2000]
+                told.append(f"{uuid} finished: {ans.get('status')}"
+                            + (f" (exit {ans['exit_code']})" if ans.get("exit_code") is not None else "")
+                            + (f"\nLast output:\n{tail}" if tail else ""))
+                log(f"{eid}: job {uuid} {ans.get('status')} after {int(spent)}s of waiting")
+                break
+            log(f"{eid}: job {uuid} still {ans.get('status')} (waited {int(spent)}s of {int(budget)}s, "
+                f"next check in {int(min(wait * 2, cap))}s)")
+            wait *= 2
+        else:
+            state = (last or {}).get("status") or "unknown"
+            return False, (f"{uuid} is still {state} after {int(spent)} s of waiting ({n} checks, backing off to "
+                           f"{int(cap)} s each). The queue is shared; do not resubmit it. If it is stuck, cancel it "
+                           f"and report `failed` with the reason.")
+    return True, "\n\n".join(told) or "the job reported no output"
 
 
 _LEAD_LOCK = asyncio.Lock()  # one lead session, several experiments: a conference turn never interleaves
@@ -1153,12 +1309,14 @@ async def build_experiment(args, exp, claims, lead):
               f"describes, run a short pilot first and report stage `pilot`; the full runs come after the pilot is "
               f"reviewed. {BUILD_RULES}\nIf you cannot go on without an answer the paper does not give, put the "
               f"question in `questions` with what you already checked instead of guessing: the lead answers in one "
-              f"turn.\nWrite the run files in this format:\n{fmt}\n\nExperiment:\n{_j(brief)}")
+              f"turn.\nAfter you submit a GPU job, report stage `submitted` with its `job_ids` and END YOUR TURN: the "
+              f"flow waits for the job and wakes you with its output.\nWrite the run files in this format:"
+              f"\n{fmt}\n\nExperiment:\n{_j(brief)}")
     stage, open_issues, record = None, ["never reviewed"], {}
     decisions, accepted, used, fixes, asked, reviews, turns = [], [], 0, 0, 0, 0, 0
     # `used` counts reviews only: a turn that asks or that triggers a spec patch is not a review round. `turns` is a
     # hard stop so an experiment whose lead never resolves anything still ends.
-    while used < rounds and turns < rounds + max_questions + max_fixes + 3:
+    while used < rounds and turns < 2 * rounds + max_questions + max_fixes + 3:
         turns += 1
         built = await builder.send(prompt, schema=BUILD)
         if not built or built["stage"] == "failed":
@@ -1167,6 +1325,20 @@ async def build_experiment(args, exp, claims, lead):
             continue
         stage = built["stage"]
         record = {"choices": built.get("choices") or [], "limits": built.get("limits") or []}
+        if stage == "submitted":
+            submitted = [str(j) for j in (built.get("job_ids") or [])]
+            if _local(args):
+                prompt = ("There is no GPU and no gpurun here. Run the experiment in your shell and report the run "
+                          "files.")
+                continue
+            if not submitted:
+                prompt = "You reported `submitted` with no `job_ids`. Submit the run and report its job ids."
+                continue
+            _record_jobs(eid, submitted)
+            finished, text = await wait_for_jobs(args, eid, submitted)
+            prompt = (text + ("\nDownload the run files and report the stage you reached."
+                              if finished else "\nReport what you have now.") + f"\nExperiment:\n{_j(brief)}")
+            continue
         open_q = [q for q in (built.get("questions") or []) if q.get("blocking")]
         if open_q and asked >= max_questions:
             log(f"{eid}: {len(open_q)} question(s) left unanswered: the {max_questions}-question budget is spent")
@@ -1295,8 +1467,13 @@ async def tune(args, exps, short, blind):
     return best, used
 
 
-async def final_verdicts(args, claims, exps, rows, audits, caps):
+async def final_verdicts(args, claims, exps, rows, audits, caps, decisions=()):
+    """Verdicts from the judge, with the lead's build-time decisions as evidence: a decision never turns a failed
+    measurement into `reproduced`, but it is what justifies `could_not_test` when the protocol cannot identify the
+    claim (2026-11-07: the lead ruled four level claims untestable for a paper-side inconsistency and the judge, which
+    never saw that ruling, would have judged them on the raw numbers anyway)."""
     ids = [r["id"] for r in rows]
+    decided = [d for d in decisions or [] if d.get("experiment") in {r["experiment"] for r in rows}]
     prompt = (
         "You are the final judge. Set each claim's final verdict: reproduced, partial, not_reproduced or "
         "could_not_test. Read paper.pdf and scope.txt, and check the run files in repo/ as far as you need. The rule "
@@ -1304,8 +1481,14 @@ async def final_verdicts(args, claims, exps, rows, audits, caps):
         "you depart from a rule verdict or a cap, say exactly why, citing a file or a number. Judge what was "
         "measured. A large gap in 'scale' means the setup may differ from the paper's; the paper's method doing "
         "better than the paper (a `method` claim, or an ordering's better arm) still reproduces it. A row with `tuned` was matched "
-        "after a hyperparameter search, which the user allows: it may be `reproduced` if its audited numbers match.\n\n"
+        "after a hyperparameter search, which the user allows: it may be `reproduced` if its audited numbers match. A "
+        "lead's decision can justify `could_not_test` when the protocol cannot identify a claim, and it never turns a "
+        "failed measurement into `reproduced`.\n\n"
         "Rule results (JSON):\n" + json.dumps(rows, sort_keys=True) + "\nEnd of rule results.\n\nCaps:\n" + _j(caps)
+        + (("\n\nDecisions the lead took during the build (its call, not the paper's - say in `reason` which one you "
+            "used):\n" + _j([{"experiment": d.get("experiment"), "key": d.get("key"), "answer": d.get("answer"),
+                                "source": d.get("source"), "citation": d.get("citation")} for d in decided]))
+           if decided else "")
         + "\n\nClaims:\n" + _j([c for c in claims if c["id"] in ids]) + "\nExperiments:\n" + _j(exps)
         + "\nAudits:\n" + _j({i: audits.get(i) for i in ids}))
     sess = _Turns("judge", options=_opts(args, "judge"))
@@ -1425,7 +1608,8 @@ async def run(args):
         rows.append({"id": cid, "experiment": exp_of[cid], "paper": paper if isinstance(paper, str) else _fmt(paper),
                      "measured": _measured(c, res), "verdict": v, "caps": [x["reason"] for x in mine],
                      "scale": scale_note(c, res), **({"tuned": tuned_row, "tuned_match": match} if tuned_row else {})})
-    verdicts = await final_verdicts(args, claims, exps, rows, audits, caps)
+    verdicts = await final_verdicts(args, claims, exps, rows, audits, caps,
+                                    [d for s in states for d in s.get("decisions") or []])
     for r in rows:
         r["rule_verdict"] = r["verdict"]
         if verdicts and r["id"] in verdicts:
