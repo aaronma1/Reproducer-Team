@@ -233,7 +233,8 @@ async def test_figure_numbers_are_read_twice_and_widen_the_tolerance():
     assert [x["field"] for x in r["figure_reads"]] == ["paper_a", "paper_b"]
 
 
-async def test_binding_unstated_limit_blocks_without_the_reviewer():
+async def test_a_binding_limit_goes_to_the_lead_with_its_evidence():
+    """A limit the paper does not state that cuts 40% is not a builder defect: raising it is a budget question."""
     fx = _base()
     cap = {"name": "eval episode cap", "value": "2000 steps", "stated_by_paper": False, "bound_fraction": 0.4,
            "evidence": "runs/m/seed0.json"}
@@ -241,9 +242,56 @@ async def test_binding_unstated_limit_blocks_without_the_reviewer():
     fx["reviewer:main#2"] = OK                          # the reviewer misses it; the build check does not
     fixed = {**fx["builder:main#2"], "limits": [{**cap, "value": "200000 steps", "bound_fraction": 0.0}]}
     fx["builder:main#3"], fx["reviewer:main#3"] = fixed, OK
+    fx["lead:conf:main"] = {"answers": [{"key": "limit:eval episode cap", "source": "reference",
+                                         "citation": "scope.txt compute budget",
+                                         "answer": "raise it to 200000 steps and re-run; the budget covers it"}]}
     r, be = await _run(fx)
-    assert "builder:main#3" in be.calls and "cut 40.0%" in be.prompts["builder:main#3"]
-    assert r["experiments"][0]["reviewed"] and r["experiments"][0]["rounds"] == 3
+    assert "cut 40.0%" in be.prompts["lead:conf:main"]                      # the evidence reaches the lead
+    assert "raise it to 200000 steps" in be.prompts["builder:main#3"]       # the instruction reaches the builder
+    assert be.calls.index("reviewer:main#2") < be.calls.index("lead:conf:main")
+    assert r["experiments"][0]["reviewed"] and r["experiments"][0]["rounds"] == 2   # the escalated round was void
+
+
+async def test_a_narrowing_the_lead_accepts_stops_blocking():
+    fx = _base()
+    cap = {"name": "steps budget", "value": "10000 steps", "stated_by_paper": False, "bound_fraction": 0.905,
+           "evidence": "every curve ends at 10000 steps"}
+    for n in ("", "#2"):
+        fx[f"builder:main{n}"] = {**fx["builder:main"], "limits": [cap]}   # unchanged: the lead accepted it
+    fx["builder:main#3"] = _base()["builder:main#2"]
+    fx["reviewer:main#3"] = OK
+    fx["lead:conf:main"] = {"answers": [{"key": "limit:steps budget", "source": "decision",
+                                         "answer": "accept the narrowing: the budget cannot cover the full sweep"}]}
+    r, be = await _run(fx)
+    assert r["verdict"] == "reproduced"
+    assert be.prompts["builder:main#2"].startswith("The lead answered")     # told once, not five times
+    assert "cut 90.5%" not in be.prompts["builder:main#2"]                  # no longer a builder problem
+    assert r["lead_decisions"][0]["source"] == "decision"
+    assert "accept the narrowing" in r["caps_md"]                           # and it is in the report
+
+
+async def test_a_declared_guard_may_bind_a_little():
+    fx = _base()
+    guard = {"name": "safety steps", "value": "2000000 steps", "stated_by_paper": False, "bound_fraction": 0.05,
+             "evidence": "only the slow seed reaches it, far above the paper's run length", "guard": True}
+    fx["builder:main"] = {**fx["builder:main"], "limits": [guard]}
+    r, be = await _run(fx)
+    assert r["verdict"] == "reproduced"
+    assert not any(c.startswith("lead:conf") for c in be.calls)             # 5% is a guard, not a narrowing
+    assert "cut 5.0%" not in be.prompts["builder:main#2"]
+
+
+async def test_a_stopped_run_still_writes_a_report(tmp_path):
+    fx = _base()
+    for n in ("", "#2"):
+        fx[f"reviewer:main{n}"] = BLOCK
+    fx["builder:main#2"] = _base()["builder:main"]
+    r, be = await _run(fx, {"build_rounds": 2, "root": str(tmp_path)})
+    assert r["verdict"] == "could_not_test"
+    assert "never updates its weights" in r["report"]        # the open finding survives the stop
+    assert "builder:main#3" not in be.calls                   # nothing runs after it
+    on_disk = (tmp_path / "report.md").read_text()
+    assert on_disk.startswith("# Reproduction stopped") and "never updates its weights" in on_disk
 
 
 async def test_untested_result_change_left_open_caps_partial():

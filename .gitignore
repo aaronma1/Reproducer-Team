@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Runtime logs (jiuwen)
+logs/
+
+# Claude Code local settings (shared .claude/settings.json stays tracked)
+.claude/settings.local.json

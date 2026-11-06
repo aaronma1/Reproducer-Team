@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__gpu_runner__gpu_output",
+      "mcp__gpu_runner__gpu_status",
+      "mcp__gpu_runner__gpu_list",
+      "mcp__gpu_runner__gpu_wait",
+      "mcp__claude-artifacts__guide",
+      "mcp__claude-artifacts__read_file",
+      "Bash(journalctl *)",
+      "Bash(tmux ls)"
+    ]
+  }
+}
