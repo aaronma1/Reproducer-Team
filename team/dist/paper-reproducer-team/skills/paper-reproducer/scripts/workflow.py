@@ -949,6 +949,17 @@ def _stop(reason, states=None, **extra):
 
 # ===================================================================== steps ==
 
+OUTPUT_RULES = (
+    "Keep every tool result small. What a tool returns is copied into the run's record and its history, so an "
+    "unbounded dump costs tokens twice and can overrun the progress stream. Print the fields you need - `jq "
+    "'.metrics, .config'` on a run file, not its `curves` array; `tail -n 40` or `grep` a log; `head` a file, or read "
+    "it with `limit`/`offset`/`pages` - and never dump a whole log, dataset or source tree. `glob` a specific "
+    "directory, not a run root. When a check turns on a specific number, read that number rather than the file around "
+    "it: a review that quotes no numbers is not a review. Call a tool by its name - `gpu_submit`, `gpu_wait`, "
+    "`gpu_output` with `tail_lines`, `download_job_files` - instead of `tool_search`, which returns the whole "
+    "catalogue every time."
+)
+
 BUILD_RULES = (
     "Follow the paper's own text first: its equations, algorithm boxes, code listings and tables. Fill only what it "
     "leaves open, from a reference implementation it points to or your own judgment, and settle each of the "
@@ -993,6 +1004,12 @@ READ_PROMPT = (
     "page, which curves, and where to read them, e.g. at the end of training). Numbers only in a plot are read off "
     "it again afterwards by looking at the figure; you can look at a page yourself with view_page.\n\n"
     + _example(EXAMPLE_CLAIMS))
+# Every prompt that reads files, runs commands or touches the GPU carries the output rule: a tool result is copied
+# into the run's record and the run's history, so an unbounded dump is paid for twice (2026-11-07: 400 tool results
+# over 5 KB were 77% of a 6.5 MB activity trail and overran the 6 MB progress budget).
+BUILD_RULES = BUILD_RULES + "\n" + OUTPUT_RULES
+REVIEW_RULES = REVIEW_RULES + "\n" + OUTPUT_RULES
+READ_PROMPT = READ_PROMPT + "\n" + OUTPUT_RULES
 READ_RULES = ["arm names are lowercase slugs; an ordering's better and worse are two different listed arms",
               "claim ids are unique lowercase slugs; a value claim has paper_value, a predicate has op and target",
               "every paper number is in the units of the claim's metric (a normalized metric has normalized numbers)"]
@@ -1048,7 +1065,7 @@ async def read_figures(args, claims):
             f"that field and say in `how` what is missing - a value outside the metric's range is worse than no value. "
             f"Explain in `how` which curve and point you read.\n"
             f"Fields: {_j({k: fields[k] for k in figure_fields(c)})}\nWhere: {c.get('figure') or c.get('anchors')}\n"
-            f"Claim:\n{_j(public_claim(c))}",
+            f"Claim:\n{_j(public_claim(c))}\n\n{OUTPUT_RULES}",
             label=_try(f"{role}:{c['id']}", n), schema=FIGREAD, options=_opts(args, role))
 
     reads = await parallel([lambda c=c, role=role: read_one(c, role) for c in todo
@@ -1404,7 +1421,7 @@ async def evaluate(args, exps, by_id, root):
     prompt = (f"Compute every claim below from the raw run files with your own code in repo/eval/, as the paper "
               f"defines the metric. Fill the fields exactly as listed (a missing number is null) and list the run "
               f"files you used in `sources`.\nRun files:\n{run_format(root)}\n\nFields:\n{fields}\n\n"
-              f"Experiments:\n{_j([_exp_brief(e) for e in exps])}")
+              f"Experiments:\n{_j([_exp_brief(e) for e in exps])}\n\n{OUTPUT_RULES}")
     ev = _Turns("evaluator", options=_opts(args, "evaluator"))
     out = {}
     for attempt in (1, 2):
@@ -1423,7 +1440,7 @@ async def audit_all(args, want, root, suffix=""):
     audits = await parallel([lambda c=c, m=m: ask(
         f"Independently recompute this claim from the raw run files with your own code (a python heredoc in your "
         f"read-only shell), not anyone else's. Fill the fields exactly as follows and list the run files you used:\n- {_result_fields(c, m)}\n"
-        f"Run files:\n{run_format(root)}\nClaim:\n{_j(public_claim(c))}",
+        f"Run files:\n{run_format(root)}\nClaim:\n{_j(public_claim(c))}\n\n{OUTPUT_RULES}",
         label=f"audit:{c['id']}{suffix}", schema=AUDIT, options=_opts(args, "audit")) for c, m in want])
     return {c["id"]: a for (c, _), a in zip(want, audits)}
 
@@ -1448,7 +1465,8 @@ async def tune(args, exps, short, blind):
         f"{run_format('repo/tuned')}\n{_compute_note(args)}\n\nAnswer for the best setting so far, fields exactly as "
         f"listed; `trials` counts every setting tried so far, `changes` lists every value that differs from the blind "
         f"run:\n{fields}\n\nClaims, with the paper's numbers:\n{_j(short)}\nBlind results:\n"
-        f"{_j({c['id']: blind.get(c['id']) for c in short})}\nExperiments:\n{_j([_exp_brief(e) for e in exps])}")
+        f"{_j({c['id']: blind.get(c['id']) for c in short})}\nExperiments:\n{_j([_exp_brief(e) for e in exps])}"
+        f"\n\n{OUTPUT_RULES}")
     best, used = {}, 0
     for rnd in range(1, rounds + 1):
         ans = await sess.send(prompt, schema=TUNED)
@@ -1490,7 +1508,7 @@ async def final_verdicts(args, claims, exps, rows, audits, caps, decisions=()):
                                 "source": d.get("source"), "citation": d.get("citation")} for d in decided]))
            if decided else "")
         + "\n\nClaims:\n" + _j([c for c in claims if c["id"] in ids]) + "\nExperiments:\n" + _j(exps)
-        + "\nAudits:\n" + _j({i: audits.get(i) for i in ids}))
+        + "\nAudits:\n" + _j({i: audits.get(i) for i in ids}) + "\n" + OUTPUT_RULES)
     sess = _Turns("judge", options=_opts(args, "judge"))
     for attempt in range(1, int(args.get("max_tries", 3)) + 1):
         ans = await sess.send(prompt, schema=JUDGE)
