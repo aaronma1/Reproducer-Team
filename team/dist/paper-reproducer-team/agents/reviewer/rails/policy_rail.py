@@ -281,6 +281,25 @@ def decide(policy: dict, root: str | None, experiment: str | None, name: str, ar
             raise Denied(f"{policy.get('role')} has no web access")
 
 
+def unshow(value: Any, wrapped: str, original: str) -> Any:
+    """`value` (a tool result or tool message) with every `wrapped` replaced by `original`. Strings, dicts and lists
+    are rebuilt; other objects get their `content` / `data` attribute rewritten in place."""
+    if isinstance(value, str):
+        return value.replace(wrapped, original)
+    if isinstance(value, dict):
+        return {k: unshow(v, wrapped, original) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(unshow(v, wrapped, original) for v in value)
+    for attr in ("content", "data"):
+        inner = getattr(value, attr, None)
+        if isinstance(inner, (str, dict, list)):
+            try:
+                setattr(value, attr, unshow(inner, wrapped, original))
+            except (AttributeError, TypeError, ValueError):
+                pass
+    return value
+
+
 def _text(x: Any) -> str:
     if isinstance(x, str):
         return x
@@ -306,6 +325,7 @@ class RunPolicyRail(AgentRail):
         self.sandbox = self.policy.get("sandbox", "bwrap")
         self.own_workspace: str | None = None
         self.views = 0
+        self.shown: dict[str, str] = {}  # bwrap-wrapped command -> the command the model wrote, until its result
 
     def init(self, agent) -> None:
         """Remember this worker's own workspace, the one directory outside the run root it may read besides the
@@ -358,11 +378,32 @@ class RunPolicyRail(AgentRail):
                 inputs.tool_args = args
             except ValueError:
                 args = {}
+        _, inner, _ = unwrap(name, args)
+        before = inner.get("command") if isinstance(inner, dict) else None
         try:
             decide(self.policy, self.root, self.experiment, name, args, self.sandbox, self.own_workspace)
             self.count_view(name, args)
         except Denied as exc:
             self._reject(ctx, f"[run policy] {exc}")
+            return
+        after = inner.get("command") if isinstance(inner, dict) else None
+        if isinstance(before, str) and isinstance(after, str) and after != before:
+            self.shown[after] = before  # after_tool_call puts `before` back where the result echoes `after`
+
+    async def after_tool_call(self, ctx) -> None:
+        """Show the model the command it wrote, not its bwrap form: the bash tool echoes the command it ran, and a
+        model that sees `bwrap --args 3 bash -c '...' 3< <file>` copies it, which then fails inside the sandbox (the
+        args file is not mounted there). 2026-11-09: 56 of two builders' 90 shell calls."""
+        inputs = ctx.inputs
+        _, args, _ = unwrap(str(getattr(inputs, "tool_name", "") or ""), getattr(inputs, "tool_args", None))
+        wrapped = args.get("command") if isinstance(args, dict) else None
+        original = self.shown.pop(wrapped, None) if isinstance(wrapped, str) else None
+        if original is None:
+            return
+        for field in ("tool_msg", "tool_result"):
+            value = getattr(inputs, field, None)
+            if value is not None:
+                setattr(inputs, field, unshow(value, wrapped, original))
 
     @staticmethod
     def _reject(ctx, message: str) -> None:

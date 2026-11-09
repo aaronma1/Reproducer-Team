@@ -328,3 +328,31 @@ def test_view_page_is_capped_per_turn(monkeypatch):
     asyncio.run(rail.before_invoke(SimpleNamespace(inputs=SimpleNamespace(query="next turn"))))
     call()
     assert len(rejected) == 1                                      # a new turn starts a new count
+
+
+def test_shell_results_show_the_command_as_written_not_its_bwrap_form(run, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+    monkeypatch.setattr(pr.shutil, "which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr(pr, "load_policy", lambda: {**ROLES["builder"], "sandbox": "bwrap"})
+    rail = pr.RunPolicyRail()
+    rail.root, rail.experiment = run, "exp1"
+
+    def call(name, args, command):
+        inputs = SimpleNamespace(tool_name=name, tool_args=args)
+        ctx = SimpleNamespace(inputs=inputs, extra={})
+        asyncio.run(rail.before_tool_call(ctx))
+        inner = args["args"] if name == "tool_call" else args
+        ran = inner["command"]
+        assert ran.startswith("bwrap --args 3 ")                       # the shell still runs sandboxed
+        echo = f"Command: {ran}\nStdout: hi\n\nStderr: (empty)\nExit Code: 0"   # the bash tool echoes what ran
+        inputs.tool_result = {"content": echo}
+        inputs.tool_msg = ToolMessage(content=echo, tool_call_id="c1")
+        asyncio.run(rail.after_tool_call(ctx))
+        for shown in (inputs.tool_msg.content, inputs.tool_result["content"]):
+            assert shown.startswith(f"Command: {command}\nStdout: hi") and "bwrap" not in shown
+
+    call("bash", {"command": "echo 'hi there'"}, "echo 'hi there'")
+    call("tool_call", {"name": "bash", "args": {"command": "ls -la"}}, "ls -la")
+    assert rail.shown == {}                                            # nothing kept once the result is shown

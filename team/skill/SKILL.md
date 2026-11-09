@@ -24,7 +24,9 @@ does not use up a `build_rounds` round.
 
 1. Make a run directory (absolute path) holding `paper.pdf` and `scope.txt` (what to reproduce, compute budget,
    rules such as "do not use the authors' code"). Every role reads and writes only under it.
-2. Call `swarmflow(script_path=<this skill's dir>/scripts/workflow.py, args=<JSON string>)`. Do not edit the script.
+2. Call `swarmflow(script_path=<skill_directory>/scripts/workflow.py, args=<JSON string>)`, where
+   `<skill_directory>` is the path `skill_tool` returned when it loaded this skill. Use it as given: this is a team
+   skill, so it is not under the global installed-skills directory. Do not edit the script.
 
 args (JSON): `{"root": "<run dir>", "compute": "auto", "experts": true}` plus optional
 `"smoke": true, "max_claims": 1` (a short check run), `"build_rounds": 5, "max_tries": 3, "max_questions": 2,
