@@ -8,5 +8,6 @@
   ],
   "shell": null,
   "gpu": null,
-  "web": false
+  "web": false,
+  "sandbox": "bwrap"
 }

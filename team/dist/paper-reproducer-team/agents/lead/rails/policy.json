@@ -7,5 +7,6 @@
   "write": [],
   "shell": null,
   "gpu": null,
-  "web": true
+  "web": true,
+  "sandbox": "bwrap"
 }

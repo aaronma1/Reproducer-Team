@@ -9,8 +9,10 @@ The JiuwenSwarm port of ``framework/tools.py``: the role table lives in ``policy
   skill library, the MCP server definitions, installed expert-team packages and the worker's own workspace, after
   resolving symlinks, and never for secret-looking names. JiuwenSwarm's config/ (model API keys) is not readable.
   Until the root is known, file, shell and GPU tools are refused.
-- Shell commands run under bubblewrap with only the role's paths mounted (read-only, or read-write for its write
-  prefixes), a cleared environment, and the network only for roles with web access.
+- Shell commands: with ``"sandbox": "bwrap"`` in ``policy.json`` (``team/build.py --bwrap``) they run under
+  bubblewrap with only the role's paths mounted (read-only, or read-write for its write prefixes), a cleared
+  environment, and the network only for roles with web access; a missing ``bwrap`` then refuses every shell call.
+  With ``"sandbox": "none"`` (the default build) they run as given: the role's paths bind the file tools only.
 - GPU tools (the gpu_runner MCP, any host prefix) are allowed by level: ro (status, output, list), wait (also
   wait), run (also submit, cancel), rw (also download_job_files). Submitted dirs must be readable, download targets writable.
 - Web tools need ``web``. Other tools (todo, skills, structured_output, tool_search) pass.
@@ -34,6 +36,7 @@ except ImportError:  # pragma: no cover
     AgentRail = object
 
 POLICY_FILE = Path(__file__).with_name("policy.json")
+SANDBOXES = ("bwrap", "none")  # how shell commands run; team/build.py writes it into every policy.json
 ROOT_RX = re.compile(r"All files of this run are under (/\S+?)\. Every relative path")
 EXPERIMENT_RX = re.compile(r"You reproduce experiment `([a-z0-9][a-z0-9_-]*)`")
 
@@ -71,6 +74,9 @@ def load_policy(path: Path = POLICY_FILE) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     data.setdefault("read", [])
     data.setdefault("write", [])
+    data.setdefault("sandbox", "bwrap")  # a package built before the build chose it always sandboxed
+    if data["sandbox"] not in SANDBOXES:
+        raise ValueError(f"{path}: sandbox must be one of {', '.join(SANDBOXES)}, not {data['sandbox']!r}")
     return data
 
 
@@ -238,7 +244,8 @@ def decide(policy: dict, root: str | None, experiment: str | None, name: str, ar
         if sandbox == "none":
             return
         if not shutil.which("bwrap"):
-            raise Denied("bubblewrap (bwrap) is not installed; set REPRO_SANDBOX=none to accept unsandboxed shells")
+            raise Denied("this team was built with --bwrap but bubblewrap (bwrap) is not installed on this host; "
+                         "install it, or rebuild the team without --bwrap to run shells unsandboxed")
         if target is None or not isinstance(args.get("command"), str):
             raise Denied("bash needs a `command` string")
         target["command"] = bwrap_command(policy, root, args["command"], experiment)
@@ -282,7 +289,7 @@ class RunPolicyRail(AgentRail):
         self.policy = load_policy()
         self.root: str | None = None
         self.experiment: str | None = None
-        self.sandbox = os.environ.get("REPRO_SANDBOX", "bwrap")
+        self.sandbox = self.policy.get("sandbox", "bwrap")
         self.own_workspace: str | None = None
         self.views = 0
 

@@ -8,5 +8,6 @@
   "write": [],
   "shell": "ro",
   "gpu": null,
-  "web": false
+  "web": false,
+  "sandbox": "bwrap"
 }

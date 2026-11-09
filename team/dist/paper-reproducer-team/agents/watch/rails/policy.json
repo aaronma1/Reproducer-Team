@@ -4,5 +4,6 @@
   "write": [],
   "shell": null,
   "gpu": "wait",
-  "web": false
+  "web": false,
+  "sandbox": "bwrap"
 }

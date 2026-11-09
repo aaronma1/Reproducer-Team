@@ -1,11 +1,14 @@
 """Build the paper-reproducer-team expert team (AgentGroup) package from team/ sources.
 
-    python team/build.py [--out team/dist] [--no-zip]
+    python team/build.py [--bwrap] [--out team/dist] [--no-zip]
 
 Writes <out>/paper-reproducer-team/ and <out>/paper-reproducer-team.zip (the file to import or share): the group
 manifest, one expert per role in team/roles.json (persona, the RunPolicyRail with that role's policy.json, the
 view_page tool), and the group-shared paper-reproducer skill with flows/reproducer_flow.py as its
 scripts/workflow.py. Every member gets its own copy of the shared files because a package may not contain symlinks.
+`--bwrap` makes every member's shell run in a bubblewrap sandbox with only its role's paths mounted; the host running
+the team then needs `bwrap`, and a member's shell calls are refused without it. Without `--bwrap` shell commands run
+unsandboxed and the role's paths bind the file tools only. The choice is written into each member's policy.json.
 The package README.md (the team's description in JiuwenSwarm) is team/README.md with the "Results and cost" table
 from docs/swarmflow-notes.md inserted at the top.
 Then it checks the result against the rules JiuwenSwarm's publish step applies and zips it, with the package
@@ -26,6 +29,7 @@ SKILL = "paper-reproducer"
 MEMBER_RX = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 NOTES = REPO / "docs" / "swarmflow-notes.md"
 RESULTS_HEADING = "### Results and cost"
+SANDBOXES = ("bwrap", "none")  # how members' shells run; team/common/policy_rail.py reads it from policy.json
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -43,13 +47,23 @@ def results_section() -> str:
     return body
 
 
-def readme() -> str:
-    """team/README.md with the results table inserted right after its title, as the team's detail page shows it."""
+SANDBOX_NOTE = {
+    "bwrap": "**Shell sandbox: bubblewrap.** Every member's shell runs in a bubblewrap sandbox with only its role's "
+             "paths mounted. The host needs `bwrap` installed; without it, shell calls are refused.",
+    "none": "**Shell sandbox: none.** Shell commands run unsandboxed: the role's paths bind the file tools only, and a "
+            "shell command can read or write anything the JiuwenSwarm user can. Build with `--bwrap` to confine them.",
+}
+
+
+def readme(sandbox: str = "none") -> str:
+    """team/README.md with the results table inserted right after its title, as the team's detail page shows it, and
+    a line saying how this build runs shell commands."""
     title, _, rest = (HERE / "README.md").read_text(encoding="utf-8").partition("\n")
-    return f"{title}\n\n## Results so far\n\n{results_section()}\n\n{rest.lstrip()}"
+    return f"{title}\n\n{SANDBOX_NOTE[sandbox]}\n\n## Results so far\n\n{results_section()}\n\n{rest.lstrip()}"
 
 
-def build(out: Path) -> Path:
+def build(out: Path, sandbox: str = "none") -> Path:
+    assert sandbox in SANDBOXES, sandbox
     roles = {k: v for k, v in json.loads((HERE / "roles.json").read_text(encoding="utf-8")).items()
              if not k.startswith("_")}
     pkg = out / NAME
@@ -66,7 +80,7 @@ def build(out: Path) -> Path:
         if "policy" in spec:  # the leader only launches the skill; it has no role policy
             (d / "rails").mkdir()
             shutil.copy(HERE / "common" / "policy_rail.py", d / "rails" / "policy_rail.py")
-            _write_json(d / "rails" / "policy.json", {"role": role, **spec["policy"]})
+            _write_json(d / "rails" / "policy.json", {"role": role, **spec["policy"], "sandbox": sandbox})
             (d / "tools").mkdir()
             shutil.copy(HERE / "common" / "view_page.py", d / "tools" / "view_page.py")
             manifest["tools"] = [{"file": "tools/view_page.py", "class": "ViewPage"}]
@@ -87,7 +101,7 @@ def build(out: Path) -> Path:
         "instruction": "Run the paper-reproducer skill with experts=true. The leader stages the paper and launches "
                        "the workflow; the script hands each step to the member of the same name.",
         "agents": list(roles), "skills": [SKILL]})
-    (pkg / "README.md").write_text(readme(), encoding="utf-8")  # JiuwenSwarm shows it as the team's description
+    (pkg / "README.md").write_text(readme(sandbox), encoding="utf-8")  # JiuwenSwarm shows it as the team's description
     check(pkg)
     return pkg
 
@@ -112,6 +126,9 @@ def check(pkg: Path) -> None:
         assert any((pkg / "agents" / a / m["persona"]["dir"]).glob("*.md")), f"{a}: persona needs Markdown"
         for entry in m.get("tools", []) + m.get("rails", []):
             assert (pkg / "agents" / a / entry["file"]).is_file(), f"{a}: missing {entry['file']}"
+        policy = pkg / "agents" / a / "rails" / "policy.json"
+        if policy.is_file():
+            assert json.loads(policy.read_text(encoding="utf-8")).get("sandbox") in SANDBOXES, f"{a}: sandbox"
     for s in group["skills"]:
         assert (pkg / "skills" / s / "SKILL.md").is_file(), s
     assert not any(p.is_symlink() for p in pkg.rglob("*")), "a package may not contain symlinks"
@@ -128,13 +145,19 @@ def check(pkg: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", type=Path, default=HERE / "dist")
+    ap.add_argument("--bwrap", action="store_true",
+                    help="run every member's shell in a bubblewrap sandbox (the host then needs bwrap)")
     ap.add_argument("--no-zip", dest="zip", action="store_false",
                     help="skip writing <out>/paper-reproducer-team.zip")
     ap.add_argument("--zip", action="store_true", help=argparse.SUPPRESS)  # the default; kept for old commands
     ap.set_defaults(zip=True)
     a = ap.parse_args()
-    pkg = build(a.out)
+    pkg = build(a.out, "bwrap" if a.bwrap else "none")
     print(pkg)
+    if a.bwrap:
+        print("shell sandbox: bubblewrap (the host running the team needs `bwrap`)")
+    else:
+        print("shell sandbox: none - shell commands run unsandboxed; rebuild with --bwrap to confine them")
     if a.zip:
         print(make_zip(pkg))
 

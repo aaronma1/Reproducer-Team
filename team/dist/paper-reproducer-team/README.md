@@ -1,5 +1,7 @@
 # paper-reproducer-team (JiuwenSwarm expert team)
 
+**Shell sandbox: bubblewrap.** Every member's shell runs in a bubblewrap sandbox with only its role's paths mounted. The host needs `bwrap` installed; without it, shell calls are refused.
+
 ## Results so far
 
 Agent = JiuwenSwarm agent mode, one deepseek-v4.1-flash agent. Cluster = JiuwenSwarm team mode, a leader with engineer and verifier members, deepseek-v4.1-flash. SwarmFlow = the scripted flow, deepseek-v4.1-flash-1017 for authors and glm-5.3-flash for most checkers.
@@ -73,8 +75,9 @@ Each member except the leader carries `RunPolicyRail`, which checks every tool c
 | tuner | paper, repo/ | repo/tuned/ | rw | rw | yes |
 | reporter | everything | report.md | - | - | - |
 
-Paths are relative to the run directory. Shell commands run under bubblewrap with only those paths mounted, a
-cleared environment, and the network only for roles with web access. GPU levels: `ro` status/output/list, `wait`
+Paths are relative to the run directory. In a team built with `--bwrap`, shell commands run under bubblewrap with
+only those paths mounted, a cleared environment, and the network only for roles with web access; otherwise they run
+unsandboxed and the paths bind the file tools only. GPU levels: `ro` status/output/list, `wait`
 also wait, `run` also submit/cancel, `rw` also download. Every member also has `view_page`, which renders a PDF page or a
 cropped panel to a JPEG to open with `read_file`.
 
@@ -94,6 +97,7 @@ cropped panel to a JPEG to open with `read_file`.
 ```sh
 python team/build.py                # -> team/dist/paper-reproducer-team/ and team/dist/paper-reproducer-team.zip
 python team/build.py --no-zip       # directory only
+python team/build.py --bwrap        # members' shells run in a bubblewrap sandbox (host needs bwrap)
 ```
 
 1. Import it in JiuwenSwarm: Web, Agent management, Expert Teams, import `team/dist/paper-reproducer-team.zip`
@@ -109,9 +113,10 @@ Optional skill args: `"smoke": true, "max_claims": 1` for a short check run, `bu
 `"models": {"strong": ..., "cheap": ...}` (workers on `strong`, checkers on `cheap`, so no agent checks its own
 model's work). See `skill/SKILL.md`.
 
-The host needs `bwrap` (bubblewrap) for the sandboxed shell and `uv` in `~/.local/bin` for Python environments.
-`REPRO_SANDBOX=none` in the backend's environment turns the shell sandbox off (role paths are then enforced for
-file tools only).
+The host needs `uv` in `~/.local/bin` for Python environments. The shell sandbox is chosen when the team is built:
+`python team/build.py --bwrap` confines every member's shell with bubblewrap, and the host then needs `bwrap`
+installed (a missing one refuses every shell call, with a message saying so). A plain `python team/build.py` builds
+a team whose shell commands run unsandboxed, and says so when it builds and at the top of the package README.
 
 ## Publish
 

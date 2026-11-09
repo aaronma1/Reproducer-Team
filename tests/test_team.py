@@ -145,7 +145,30 @@ def test_a_wrapped_command_runs_in_the_sandbox(run):
 
 def test_shell_without_bubblewrap_is_refused(run, monkeypatch):
     monkeypatch.setattr(pr.shutil, "which", lambda _: None)
-    denied("builder", run, "bash", {"command": "ls"}, experiment="exp1")
+    with pytest.raises(pr.Denied, match="built with --bwrap"):
+        pr.decide(ROLES["builder"], run, "exp1", "bash", {"command": "ls"}, sandbox="bwrap")
+
+
+def test_a_team_built_without_bwrap_runs_shells_as_given_but_keeps_the_other_rules(run, monkeypatch):
+    monkeypatch.setattr(pr.shutil, "which", lambda _: None)           # bwrap is not needed at all
+    args = {"command": "python train.py"}
+    pr.decide(ROLES["builder"], run, "exp1", "bash", args, sandbox="none")
+    assert args == {"command": "python train.py"}                      # not rewritten
+    with pytest.raises(pr.Denied):
+        pr.decide(ROLES["lead"], run, None, "bash", {"command": "ls"}, sandbox="none")       # still no shell
+    with pytest.raises(pr.Denied):
+        pr.decide(ROLES["audit"], run, None, "write_file", {"file_path": f"{run}/x"}, sandbox="none")
+
+
+def test_the_rail_takes_the_sandbox_from_its_policy(tmp_path):
+    f = tmp_path / "policy.json"
+    f.write_text(json.dumps({"role": "builder", "sandbox": "none"}))
+    assert pr.load_policy(f)["sandbox"] == "none"
+    f.write_text(json.dumps({"role": "builder"}))                      # a package built before the option
+    assert pr.load_policy(f)["sandbox"] == "bwrap"
+    f.write_text(json.dumps({"role": "builder", "sandbox": "docker"}))
+    with pytest.raises(ValueError):
+        pr.load_policy(f)
 
 
 def test_gpu_tools_by_level_and_path(run):
@@ -200,6 +223,16 @@ def test_build_writes_a_package_that_passes_the_publish_rules(tmp_path):
     assert "Rules for everyone" in (pkg / "agents" / "audit" / "persona" / "audit.md").read_text()
     assert (pkg / "skills" / "paper-reproducer" / "scripts" / "workflow.py").read_text() == \
         (ROOT / "flows" / "reproducer_flow.py").read_text()
+
+
+@pytest.mark.parametrize("sandbox", ["none", "bwrap"])
+def test_build_writes_the_shell_sandbox_into_every_policy_and_the_readme(tmp_path, sandbox):
+    pkg = build.build(tmp_path, sandbox)
+    policies = list((pkg / "agents").glob("*/rails/policy.json"))
+    assert len(policies) == len(ROLES)
+    assert {json.loads(p.read_text())["sandbox"] for p in policies} == {sandbox}
+    head = (pkg / "README.md").read_text().split("## Results so far")[0]
+    assert ("bubblewrap" if sandbox == "bwrap" else "Shell sandbox: none") in head
 
 
 @pytest.fixture
