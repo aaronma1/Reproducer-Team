@@ -2,6 +2,7 @@
   "role": "audit",
   "read": [
     "paper.pdf",
+    "paper.txt",
     "scope.txt",
     "repo"
   ],

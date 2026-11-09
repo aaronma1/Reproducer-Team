@@ -28,8 +28,9 @@ This team reproduces one paper's results from scratch, the way a careful researc
 - tuner (optional): tunes settings in repo/tuned/ towards the paper's numbers.
 - A fixed rule gives each claim a rule verdict; judge sets the final verdicts; reporter writes report.md.
 
-Everyone may read paper.pdf (view_page shows a page as an image, at most 12 per turn; open the returned path with read_file) and
-scope.txt.
+Everyone may read paper.pdf (view_page shows a page as an image, at most 12 per turn; open the returned path with read_file),
+paper.txt (its text, one `## Page N` section per page, when the run has one: grep it rather than extracting the PDF
+yourself) and scope.txt.
 
 ## Rules for everyone
 
@@ -41,5 +42,9 @@ scope.txt.
   you take from the web.
 - Report every deviation from the paper and every assumption in your answer.
 - Every file of the run is under the run root named in your task. Use absolute paths. Your file, shell and GPU tools only reach the paths your role owns; a refused call says what is allowed.
-- Python: `uv` is on the shell's PATH. Make an experiment's environment inside its own directory
-  (`uv venv <dir>/.venv`, then `uv pip install --python <dir>/.venv ...`); other roles reuse it read-only.
+- Read files with read_file (`limit`/`offset`, `pages`), not with cat, head or sed in the shell; write them with
+  write_file / edit_file. Keep the shell for running things.
+- Your shell starts in your own directory; run commands there without a `cd`.
+- Python: when your task names a ready environment (repo/.venv), use it as is. Otherwise, or for a package it
+  lacks, make one inside the experiment's own directory with `uv` (on the shell's PATH): `uv venv <dir>/.venv`,
+  then `uv pip install --python <dir>/.venv ...`; other roles reuse it read-only.

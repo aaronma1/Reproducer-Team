@@ -219,3 +219,62 @@ def test_method_may_overshoot_the_paper(f):
     lo = {"a": {"mean": 0.40, "lo": 0.35, "hi": 0.45}, "b": {"mean": 0.20, "lo": 0.15, "hi": 0.25}}
     assert f.judge_tuned(order, lo) != "reproduced"
     assert f.judge_tuned({**order, "method": False}, hi) != "reproduced"         # a diagnostic must match
+
+
+# --- run setup: shared environment, paper.txt, facts for the builder ---
+
+def test_run_setup_builds_once_and_tells_the_builder(f, tmp_path, monkeypatch):
+    import asyncio, json as js, os
+    root = tmp_path / "run"
+    (root / "repo/arms/exp1").mkdir(parents=True)
+    (root / "paper.pdf").write_bytes(b"%PDF")
+    (root / "scope.txt").write_text("s")
+    calls = []
+
+    async def fake_sh(argv, timeout=900, env=None):
+        calls.append(argv)
+        if argv[1:2] == ["venv"]:
+            os.makedirs(os.path.join(argv[4], "bin"), exist_ok=True)
+        if argv[1:2] == ["-c"] and "PdfReader" in argv[2]:
+            open(argv[4], "w").write("## Page 1\\nhello\\n")
+        if argv[1:2] == ["-c"] and "importlib.metadata" in argv[2]:
+            return 0, js.dumps({"python": "3.12.15", "packages": {"torch": "2.9.0+cpu", "numpy": "2.3.0"}})
+        assert env is None or env["UV_LINK_MODE"] == "copy"
+        return 0, ""
+
+    monkeypatch.setattr(f, "_sh", fake_sh)
+    monkeypatch.setattr(f, "_uv", lambda: "/usr/bin/uv")
+    monkeypatch.setitem(f._HOST, "root", str(root))
+    asyncio.run(f.prepare_run({"experts": True}))
+    assert [c[1] for c in calls[:3]] == ["venv", "pip", "pip"]           # venv, CPU torch, the rest
+    assert "--index-url" in calls[1] and f.ENV_TORCH_INDEX in calls[1] and "torch" in calls[1]
+    assert (root / "paper.txt").read_text().startswith("## Page 1")
+    facts = f.run_facts("exp1")
+    assert f"{root}/repo/.venv/bin/python" in facts and "torch 2.9.0+cpu" in facts and "do not check" in facts
+    assert "paper.txt" in facts and "your shell starts here" in facts and "CPUs" in facts
+    assert "paper.pdf, paper.txt, repo, scope.txt" in facts                 # the run directory, listed
+    n = len(calls)
+    f._SETUP.update(env=None, paper_txt=False, cpus=None)
+    asyncio.run(f.prepare_run({"experts": True}))                          # a resumed run reuses both
+    assert len(calls) == n and "torch 2.9.0+cpu" in f.run_facts("exp1")
+
+
+def test_run_setup_is_skipped_outside_team_runs_and_survives_failures(f, tmp_path, monkeypatch):
+    import asyncio
+    calls = []
+
+    async def failing_sh(argv, timeout=900, env=None):
+        calls.append(argv)
+        return 1, "no network"
+
+    monkeypatch.setattr(f, "_sh", failing_sh)
+    monkeypatch.setattr(f, "_uv", lambda: "/usr/bin/uv")
+    monkeypatch.setitem(f._HOST, "root", str(tmp_path))
+    f._SETUP.update(env=None, paper_txt=False, cpus=None)
+    for args in ({}, {"experts": True, "setup": False}):                 # headless runs, or turned off
+        asyncio.run(f.prepare_run(args))
+    assert calls == []
+    asyncio.run(f.prepare_run({"experts": True}))                          # uv fails: the run goes on without
+    assert len(calls) == 1 and f._SETUP["env"] is None and "Python environment" not in f.run_facts("exp1")
+    monkeypatch.setitem(f._HOST, "root", "")
+    assert f.run_facts("exp1") == ""                                       # no root, no facts

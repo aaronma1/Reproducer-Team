@@ -581,3 +581,13 @@ async def test_every_working_prompt_bounds_its_tool_output():
     assert "instead of `tool_search`" in be.prompts["builder:main"]   # the catalogue is not re-fetched
     assert "not its `curves` array" in be.prompts["reviewer:main"]     # told what to read, not just what not to
     assert "a review that quotes no numbers is not a review" in be.prompts["reviewer:main"]
+
+
+async def test_root_tells_shells_they_start_in_their_own_directory_and_builders_what_is_set_up(tmp_path):
+    (tmp_path / "paper.pdf").write_bytes(b"%PDF")
+    _, be = await _run(_base(), {"root": str(tmp_path)})                   # no experts: no setup on the host
+    b = be.prompts["builder:main"]
+    r = be.prompts["reviewer:main"]                                       # one-shot calls carry the preamble
+    assert "Your shell starts in your own directory" in r and "without a `cd`" in r
+    assert "Already set up for you" in b and f"Run directory {tmp_path}: paper.pdf" in b
+    assert "Python environment ready" not in b                             # nothing was installed

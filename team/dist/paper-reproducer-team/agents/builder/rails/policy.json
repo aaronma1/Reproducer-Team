@@ -2,6 +2,7 @@
   "role": "builder",
   "read": [
     "paper.pdf",
+    "paper.txt",
     "scope.txt",
     "repo"
   ],

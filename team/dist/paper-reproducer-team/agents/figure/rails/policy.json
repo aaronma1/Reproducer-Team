@@ -2,6 +2,7 @@
   "role": "figure",
   "read": [
     "paper.pdf",
+    "paper.txt",
     "scope.txt"
   ],
   "write": [],

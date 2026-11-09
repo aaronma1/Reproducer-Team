@@ -2,6 +2,7 @@
   "role": "lead",
   "read": [
     "paper.pdf",
+    "paper.txt",
     "scope.txt"
   ],
   "write": [],

@@ -757,8 +757,142 @@ def _where():
     if not root:
         return ""
     return (f"All files of this run are under {root}. Every relative path in this task (paper.pdf, scope.txt, "
-            f"repo/..., report.md) means {root}/<path>: give your file tools and shell commands absolute paths. "
-            "Do not write outside it.\n\n")
+            f"repo/..., report.md) means {root}/<path>: give your file tools absolute paths. Your shell starts in "
+            "your own directory (a builder's repo/arms/<experiment>/, the evaluator's repo/eval/, the tuner's "
+            "repo/tuned/, otherwise the run root), so run commands there without a `cd`. Do not write outside the "
+            "run root.\n\n")
+
+
+# ================================================================ run setup ==
+# What every builder used to work out for itself, done once per run by the flow (2026-11-09: of three builders' 105
+# shell calls, 21 looked around the run directory, 21 checked or installed Python packages and 19 pulled text out of
+# paper.pdf with their own scripts; 23 ran their experiment). JiuwenSwarm team runs only (`experts` and a `root`):
+# the setup runs on the host, outside any sandbox, before the builders start.
+ENV_PYTHON = "3.12"
+ENV_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"  # CPU torch: the PyPI wheel pulls in gigabytes of CUDA
+ENV_PACKAGES = ["numpy", "scipy", "pandas", "matplotlib", "pypdf"]
+_CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"))
+# The same directories the team's sandbox rail uses (policy_rail.SANDBOX_UV_CACHE / SANDBOX_UV_PYTHON): the shared
+# environment's interpreter must live where every sandboxed role can see it, and builders reuse the cache.
+ENV_UV = {"UV_CACHE_DIR": os.path.join(_CACHE, "repro-uv-cache"),
+          "UV_PYTHON_INSTALL_DIR": os.path.join(_CACHE, "repro-uv-python"),
+          "UV_LINK_MODE": "copy", "UV_PYTHON_INSTALL_BIN": "0"}
+_SETUP = {"env": None, "paper_txt": False, "cpus": None}  # filled by prepare_run()
+
+
+async def _sh(argv, timeout=900, env=None):
+    """(exit code, last 2000 chars of stdout+stderr) of a host command, without blocking the event loop."""
+    try:
+        p = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE,
+                                                 stderr=asyncio.subprocess.STDOUT, env={**os.environ, **(env or {})})
+        out, _ = await asyncio.wait_for(p.communicate(), timeout)
+        return p.returncode, out.decode(errors="replace")[-2000:]
+    except (OSError, asyncio.TimeoutError) as e:
+        return -1, str(e)
+
+
+def _uv():
+    for c in ("uv", os.path.join(os.path.expanduser("~"), ".local", "bin", "uv")):
+        if os.path.sep in c and os.access(c, os.X_OK):
+            return c
+        if os.path.sep not in c:
+            for d in os.environ.get("PATH", "").split(os.pathsep):
+                if d and os.access(os.path.join(d, c), os.X_OK):
+                    return os.path.join(d, c)
+    return None
+
+
+PAPER_TXT_SCRIPT = (
+    "import sys\nfrom pypdf import PdfReader\n"
+    "r = PdfReader(sys.argv[1])\n"
+    "out = ['## Page %d\\n%s' % (i + 1, (p.extract_text() or '').strip()) for i, p in enumerate(r.pages)]\n"
+    "open(sys.argv[2], 'w', encoding='utf-8').write('\\n\\n'.join(out) + '\\n')\n")
+
+
+async def prepare_env(root):
+    """A shared Python environment at <root>/repo/.venv (CPU torch and ENV_PACKAGES), or None. Kept across resumes:
+    a finished one leaves a marker with its versions."""
+    venv = os.path.join(root, "repo", ".venv")
+    marker = os.path.join(venv, "repro-env.json")
+    if os.path.exists(marker):
+        with open(marker, encoding="utf-8") as fh:
+            return json.load(fh)
+    uv = _uv()
+    if not uv:
+        log("setup: no uv on the host; builders make their own environments")
+        return None
+    py = os.path.join(venv, "bin", "python")
+    for argv in ([uv, "venv", "-q", "--allow-existing", venv, "--python", ENV_PYTHON],
+                 [uv, "pip", "install", "-q", "--python", py, "--index-url", ENV_TORCH_INDEX, "torch"],
+                 [uv, "pip", "install", "-q", "--python", py, *ENV_PACKAGES]):
+        code, out = await _sh(argv, env=ENV_UV)
+        if code != 0:
+            log(f"setup: `{' '.join(argv[1:3])}` failed ({code}): {out[-400:]}")
+            return None
+    code, out = await _sh([py, "-c", "import json, platform, importlib.metadata as m; print(json.dumps("
+                                     "{'python': platform.python_version(), 'packages': {n: m.version(n) for n in "
+                                     + repr(["torch", *ENV_PACKAGES]) + "}}))"])
+    if code != 0:
+        log(f"setup: the environment does not import: {out[-400:]}")
+        return None
+    env = {"path": venv, **json.loads(out.strip().splitlines()[-1])}
+    with open(marker, "w", encoding="utf-8") as fh:
+        json.dump(env, fh)
+    return env
+
+
+async def prepare_paper_text(root, env):
+    """paper.txt next to paper.pdf, one `## Page N` section per page, so no role extracts the text itself."""
+    pdf, txt = os.path.join(root, "paper.pdf"), os.path.join(root, "paper.txt")
+    if os.path.exists(txt):
+        return True
+    if not os.path.exists(pdf) or not env:
+        return False
+    code, out = await _sh([os.path.join(env["path"], "bin", "python"), "-c", PAPER_TXT_SCRIPT, pdf, txt], timeout=300)
+    if code != 0:
+        log(f"setup: could not extract paper.txt: {out[-400:]}")
+    return code == 0 and os.path.exists(txt)
+
+
+async def prepare_run(args):
+    """The shared environment, paper.txt and the CPU count, for the builders' task (see run_facts)."""
+    root = _HOST["root"]
+    if not (root and args.get("experts")) or args.get("setup") is False:
+        return
+    env = await prepare_env(root)
+    _SETUP.update(env=env, paper_txt=await prepare_paper_text(root, env), cpus=os.cpu_count())
+    log("setup: " + (f"environment {env['path']} (python {env['python']}, "
+                     + ", ".join(f"{k} {v}" for k, v in env["packages"].items()) + ")" if env else "no shared environment")
+        + ("; paper.txt written" if _SETUP["paper_txt"] else "; no paper.txt"))
+
+
+def run_facts(eid):
+    """What a builder would otherwise look up with ls/which/pip at the start of its turn."""
+    root = _HOST["root"]
+    if not root:
+        return ""
+    arm = os.path.join(root, "repo", "arms", eid)
+    try:
+        top = sorted(n for n in os.listdir(root) if not n.startswith("."))
+        mine = sorted(os.listdir(arm)) if os.path.isdir(arm) else []
+    except OSError:
+        top, mine = [], []
+    env = _SETUP["env"]
+    lines = [f"Run directory {root}: {', '.join(top) or '(empty)'}.",
+             f"Your directory {arm}/ (your shell starts here): {', '.join(mine) or 'empty'}."]
+    if _SETUP["paper_txt"]:
+        lines.append("paper.txt is the text of paper.pdf, one `## Page N` section per page: grep it or read it with "
+                     "read_file. Look at a figure with view_page; do not extract the PDF yourself.")
+    if env:
+        lines.append(f"Python environment ready, read-only, for every role: {env['path']}/bin/python (python "
+                     f"{env['python']}; " + ", ".join(f"{k} {v}" for k, v in env["packages"].items()) + "). Use it "
+                     "as is; do not check what it has. Only if you need another package, make your own environment "
+                     "in your directory (`uv venv .venv --python " + env["python"] + "`, then `uv pip install "
+                     "--python .venv/bin/python torch --index-url " + ENV_TORCH_INDEX + "` and the rest; uv's cache "
+                     "makes this quick) and tell the reviewer which python your runs used.")
+    if _SETUP["cpus"]:
+        lines.append(f"This machine has {_SETUP['cpus']} CPUs, shared with the other builders.")
+    return "Already set up for you:\n" + _bullets(lines) + "\n"
 
 
 async def ask(prompt, **kw):
@@ -944,8 +1078,9 @@ def _stop(reason, states=None, **extra):
 OUTPUT_RULES = (
     "Keep every tool result small. What a tool returns is copied into the run's record and its history, so an "
     "unbounded dump costs tokens twice and can overrun the progress stream. Print the fields you need - `jq "
-    "'.metrics, .config'` on a run file, not its `curves` array; `tail -n 40` or `grep` a log; `head` a file, or read "
-    "it with `limit`/`offset`/`pages` - and never dump a whole log, dataset or source tree. `glob` a specific "
+    "'.metrics, .config'` on a run file, not its `curves` array; `tail -n 40` or `grep` a log; read a file with "
+    "read_file and `limit`/`offset`/`pages`, not with cat, head or sed in the shell - and never dump a whole log, "
+    "dataset or source tree. `glob` a specific "
     "directory, not a run root. When a check turns on a specific number, read that number rather than the file around "
     "it: a review that quotes no numbers is not a review. Call a tool by its name - `gpu_submit`, `gpu_wait`, "
     "`gpu_output` with `tail_lines`, `download_job_files` - instead of `tool_search`, which returns the whole "
@@ -1320,7 +1455,7 @@ async def build_experiment(args, exp, claims, lead):
               f"question in `questions` with what you already checked instead of guessing: the lead answers in one "
               f"turn.\nAfter you submit a GPU job, report stage `submitted` with its `job_ids` and END YOUR TURN: the "
               f"flow waits for the job and wakes you with its output.\nWrite the run files in this format:"
-              f"\n{fmt}\n\nExperiment:\n{_j(brief)}")
+              f"\n{fmt}\n\n{run_facts(eid)}\nExperiment:\n{_j(brief)}")
     stage, open_issues, record = None, ["never reviewed"], {}
     decisions, accepted, used, fixes, asked, reviews, turns = [], [], 0, 0, 0, 0, 0
     # `used` counts reviews only: a turn that asks or that triggers a spec patch is not a review round. `turns` is a
@@ -1528,6 +1663,8 @@ async def run(args):
     args = parse_args(args)
     _HOST["root"] = (args.get("root") or "").rstrip("/")
     phase("Lead")
+    _SETUP.update(env=None, paper_txt=False, cpus=None)  # module state: never carry a previous run's setup over
+    setup = asyncio.ensure_future(prepare_run(args))  # installs while the lead reads; awaited before Build
     args = {**args, "compute": await resolve_compute(args)}
     lead = _Turns("lead", options=_opts(args, "lead"))
     arms, claims, rejected = await read_claims(args, lead)
@@ -1557,6 +1694,7 @@ async def run(args):
     exp_of = {c["claim_id"]: e["id"] for e in exps for c in e["claims"]}
 
     phase("Build")
+    await setup
     states = await parallel([lambda e=e: build_experiment(args, e, claims, lead) for e in exps])
     for s in states:  # a spec the lead patched mid-build supersedes the one it first wrote, downstream too
         if s.get("spec"):

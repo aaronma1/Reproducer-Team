@@ -144,13 +144,16 @@ def test_the_sandbox_args_file_is_private_and_rewritten_when_altered(run, monkey
 
 @pytest.mark.skipif(not shutil.which("bwrap"), reason="no bwrap")
 def test_a_wrapped_command_runs_in_the_sandbox(run):
-    cmd = ok("builder", run, "bash", {"command": "pwd; touch repo/arms/exp1/ok; touch repo/eval/no 2>/dev/null "
+    cmd = ok("builder", run, "bash", {"command": "pwd; touch ok; touch ../../eval/no 2>/dev/null "
                                                  "|| echo ro; ls /proc/self/fd | wc -l"}, experiment="exp1")["command"]
     r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
     if r.returncode and "Operation not permitted" in r.stderr:
         pytest.skip("bwrap cannot create namespaces here")
     out = r.stdout.split()
-    assert out[:2] == [run, "ro"] and (Path(run) / "repo/arms/exp1/ok").exists()
+    assert out[:2] == [f"{run}/repo/arms/exp1", "ro"]                  # starts in its own arm: no `cd` needed
+    assert (Path(run) / "repo/arms/exp1/ok").exists()
+    audit = ok("audit", run, "bash", {"command": "pwd"})["command"]      # a read-only shell starts in the run root
+    assert subprocess.run(["bash", "-c", audit], capture_output=True, text=True).stdout.strip() == run
     assert int(out[2]) <= 4                                            # 0-2 and ls's own: the args fd was closed
 
 
@@ -270,7 +273,7 @@ def test_build_writes_the_shell_sandbox_into_every_policy_and_the_readme(tmp_pat
     assert "starts in your own directory, `repo/arms/<experiment>/`" in builder and "network only" in builder
     audit = persona("audit")
     assert "starts in the run directory" in audit and "read-only by instruction" in audit
-    assert "Do not use the network" in audit and "`paper.pdf`, `scope.txt`, `repo/`" in audit
+    assert "Do not use the network" in audit and "`paper.pdf`, `paper.txt`, `scope.txt`, `repo/`" in audit
 
 
 @pytest.fixture
@@ -485,7 +488,7 @@ def test_pythons_uv_installs_outlive_the_call_and_are_read_only_to_readers(run, 
 def test_a_background_job_outlives_the_call_but_still_cannot_touch_host_processes(run, tmp_path):
     victim = subprocess.Popen(["sleep", "30"])                          # a host process of the same user
     try:
-        cmd = ok("builder", run, "bash", {"command": f"(sleep 2; echo done > repo/arms/exp1/bg.txt) >/dev/null 2>&1 & "
+        cmd = ok("builder", run, "bash", {"command": f"(sleep 2; echo done > bg.txt) >/dev/null 2>&1 & "
                                                      f"kill {victim.pid} 2>/dev/null || echo shielded"},
                  experiment="exp1")["command"]
         r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=10)

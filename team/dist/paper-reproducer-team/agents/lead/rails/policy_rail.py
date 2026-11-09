@@ -262,7 +262,7 @@ def bwrap_args(policy: dict, root: str, experiment: str | None, own_workspace: s
         for r in prefixes(policy, "write", experiment):
             (base / r).mkdir(parents=True, exist_ok=True)
             a += ["--bind", str(base / r), str(base / r)]
-    return a + ["--chdir", root]
+    return a + ["--chdir", str(shell_home(policy, root, experiment))]  # its own directory: no `cd` needed
 
 
 def sandbox_args_file(args: list[str]) -> Path:
