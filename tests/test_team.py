@@ -31,6 +31,7 @@ ROLES = {k: {"role": k, **v["policy"]} for k, v in json.loads((TEAM / "roles.jso
 @pytest.fixture(autouse=True)
 def sandbox_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(pr, "SANDBOX_ARGS_DIR", tmp_path / "sandbox-args")
+    monkeypatch.setattr(pr, "SANDBOX_UV_CACHE", tmp_path / "uv-cache")
     return tmp_path / "sandbox-args"
 
 
@@ -104,7 +105,10 @@ def test_shell_is_wrapped_in_bubblewrap_with_only_the_roles_paths(run, monkeypat
     argv = sandbox_argv(args["command"])
     assert argv[0] == "bwrap" and argv[-3:] == ["bash", "-c", "python train.py"]
     binds = [(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == "--bind"]
-    assert binds == [(f"{run}/repo/arms/exp1", f"{run}/repo/arms/exp1")]
+    cache = str(pr.SANDBOX_UV_CACHE)
+    assert binds == [(cache, cache), (f"{run}/repo/arms/exp1", f"{run}/repo/arms/exp1")]   # uv's shared cache
+    env = {argv[i + 1]: argv[i + 2] for i, a in enumerate(argv) if a == "--setenv"}
+    assert env["UV_CACHE_DIR"] == cache and env["UV_LINK_MODE"] == "copy"
     assert argv.index("--share-net") > argv.index("--unshare-all")   # the builder has web access (order matters)
     mounted = [argv[i + 1] for i, a in enumerate(argv) if a in ("--bind", "--ro-bind")]
     assert not any(m.endswith("/.local/share/uv") or "credentials" in m for m in mounted)   # uv's stored credentials
@@ -112,7 +116,8 @@ def test_shell_is_wrapped_in_bubblewrap_with_only_the_roles_paths(run, monkeypat
     if not resolv.startswith("/etc/") and os.path.isfile(resolv):
         assert resolv in mounted                                      # DNS works when resolv.conf is a symlink
     audit = sandbox_argv(ok("audit", run, "bash", {"command": "ls"})["command"])
-    assert "--bind" not in audit and "--share-net" not in audit       # read-only, offline
+    assert "--bind" not in audit and "--share-net" not in audit       # read-only, offline, no shared cache
+    assert cache not in audit
     denied("lead", run, "bash", {"command": "ls"})
     denied("builder", run, "powershell", {"command": "ls"}, experiment="exp1")
 
@@ -347,12 +352,91 @@ def test_shell_results_show_the_command_as_written_not_its_bwrap_form(run, monke
         ran = inner["command"]
         assert ran.startswith("bwrap --args 3 ")                       # the shell still runs sandboxed
         echo = f"Command: {ran}\nStdout: hi\n\nStderr: (empty)\nExit Code: 0"   # the bash tool echoes what ran
+        inputs.tool_call = SimpleNamespace(arguments=inputs.tool_args)   # the agent writes the rewritten args back
         inputs.tool_result = {"content": echo}
         inputs.tool_msg = ToolMessage(content=echo, tool_call_id="c1")
         asyncio.run(rail.after_tool_call(ctx))
         for shown in (inputs.tool_msg.content, inputs.tool_result["content"]):
             assert shown.startswith(f"Command: {command}\nStdout: hi") and "bwrap" not in shown
+        assert inner["command"] == command and "bwrap" not in json.dumps(inputs.tool_call.arguments)  # its history
 
     call("bash", {"command": "echo 'hi there'"}, "echo 'hi there'")
     call("tool_call", {"name": "bash", "args": {"command": "ls -la"}}, "ls -la")
     assert rail.shown == {}                                            # nothing kept once the result is shown
+
+
+@pytest.fixture
+def jw(tmp_path, monkeypatch):
+    """A fake JiuwenSwarm home laid out as a team run sees it: the advertised directories, the secrets next to them,
+    a run root in the leader's work directory, and one builder's own work directory and workspace."""
+    h = tmp_path / "jw"
+    chat = h / ".agent_teams/team1/team-workspace/artifacts/2026-11-09/chat-1"
+    for d in ("agent/workspace/skills/s1", "agent/workspace/mcp/mcp_hub", "agent/workspace/mcp/credentials",
+              "agent/workspace/plugins/agent_templates", "agent/workspace/plugins/plugin_packages",
+              ".agent_teams/agent_groups/g1", "config", ".agent_teams/team1/workspaces/b1_workspace"):
+        (h / d).mkdir(parents=True)
+    (h / "config/config.yaml").write_text("api_key: sk-secret")
+    (h / "agent/workspace/mcp/credentials/tok").write_text("secret")
+    (h / "agent/workspace/skills/s1/SKILL.md").write_text("skill\n")
+    root = chat / "work/team-leader/run1"
+    (root / "repo/arms/exp1").mkdir(parents=True)
+    (root / "paper.pdf").write_bytes(b"%PDF")
+    (chat / "work/b1").mkdir(parents=True)
+    monkeypatch.setattr(pr, "JIUWENSWARM_HOME", h)
+    monkeypatch.setattr(pr, "SANDBOX_READ", tuple(h / p for p in (
+        "agent/workspace/skills", ".agent_teams/agent_groups", "agent/workspace/mcp/mcp_hub",
+        "agent/workspace/plugins/agent_templates", "agent/workspace/plugins/plugin_packages")))
+    monkeypatch.setattr(pr.shutil, "which", lambda _: "/usr/bin/bwrap")
+    return {"home": h, "root": str(root), "work": str(chat / "work/b1"),
+            "ws": str(h / ".agent_teams/team1/workspaces/b1_workspace"), "chat": chat}
+
+
+def wrapped(jw, role="builder", work=None, command="ls"):
+    args = {"command": command}
+    pr.decide(ROLES[role], jw["root"], "exp1", "bash", args, sandbox="bwrap", own_workspace=jw["ws"],
+              work_dir=jw["work"] if work is None else work)
+    return args["command"]
+
+
+def test_the_sandbox_mounts_what_jiuwenswarm_advertises_and_nothing_secret(jw):
+    h = jw["home"]
+    argv = sandbox_argv(wrapped(jw))
+    ro = [argv[i + 1] for i, a in enumerate(argv) if a == "--ro-bind"]
+    rw = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
+    for p in ("agent/workspace/skills", ".agent_teams/agent_groups", "agent/workspace/mcp/mcp_hub",
+              "agent/workspace/plugins/agent_templates", "agent/workspace/plugins/plugin_packages"):
+        assert str(h / p) in ro
+    assert jw["ws"] in ro                                              # its own workspace, read-only
+    assert jw["work"] in rw                                            # its temporary working directory
+    assert f"{jw['root']}/repo/arms/exp1" in rw                         # and still its arm
+    mounted = " ".join(ro + rw)
+    assert "config" not in mounted and "credentials" not in mounted and str(h / "agent/workspace/mcp") + " " not in mounted + " "
+    audit = sandbox_argv(wrapped(jw, role="audit"))                    # a read-only shell gets its work dir read-only
+    assert jw["work"] in [audit[i + 1] for i, a in enumerate(audit) if a == "--ro-bind"] and "--bind" not in audit
+
+
+def test_only_a_members_own_work_directory_is_mounted(jw, tmp_path):
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    leader = str(jw["chat"] / "work/team-leader")                      # holds the run root: never mounted whole
+    for bad in (str(other), leader, "/", ""):
+        argv = sandbox_argv(wrapped(jw, work=bad))
+        binds = [argv[i + 1] for i, a in enumerate(argv) if a in ("--bind", "--ro-bind")]
+        assert bad not in binds or bad == ""
+        assert not any(b in (str(other), leader, "/") for b in binds)
+
+
+@pytest.mark.skipif(not shutil.which("bwrap"), reason="no bwrap")
+def test_a_builder_shell_reaches_its_work_dir_and_skills_but_not_config(jw, monkeypatch):
+    monkeypatch.setattr(pr.shutil, "which", shutil.which)
+    h = jw["home"]
+    cmd = wrapped(jw, command=f"touch {jw['work']}/ok && cat {h}/agent/workspace/skills/s1/SKILL.md && "
+                              f"(cat {h}/config/config.yaml 2>/dev/null || echo noconfig) && "
+                              f"(ls {h}/agent/workspace/mcp/credentials 2>/dev/null || echo nocreds) && "
+                              f"(touch {h}/agent/workspace/skills/x 2>/dev/null || echo ro) && "
+                              f"touch \"$UV_CACHE_DIR/ok\"")
+    r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    if r.returncode and "Operation not permitted" in r.stderr:
+        pytest.skip("bwrap cannot create namespaces here")
+    assert r.stdout.split() == ["skill", "noconfig", "nocreds", "ro"], r.stderr
+    assert Path(jw["work"], "ok").exists() and (pr.SANDBOX_UV_CACHE / "ok").exists()   # the shared uv cache persists

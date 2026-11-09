@@ -58,12 +58,32 @@ JIUWENSWARM_HOME = Path(os.environ.get("JIUWENSWARM_HOME", "~/.jiuwenswarm")).ex
 # library, MCP server definitions, and installed expert-team packages. Never config/ (model API keys), auth/, .env.
 OUTSIDE_READ = (JIUWENSWARM_HOME / "agent" / "workspace" / "skills",
                 JIUWENSWARM_HOME / "agent" / "workspace" / "mcp",
-                JIUWENSWARM_HOME / ".agent_teams" / "agent_groups")
+                JIUWENSWARM_HOME / ".agent_teams" / "agent_groups",
+                JIUWENSWARM_HOME / "agent" / "workspace" / "plugins" / "agent_templates",
+                JIUWENSWARM_HOME / "agent" / "workspace" / "plugins" / "plugin_packages")
+# What the sandbox mounts read-only outside the run root: the directories JiuwenSwarm's prompt names to every
+# worker ("Installed Skill root", "Installed Agent groups", ...), so a path the model was told about exists in its
+# shell too. Only mcp_hub of mcp/, whose credentials/ sits next to it (bwrap cannot filter by name the way
+# check_outside_read does), and never config/ (model API keys). Plus, per worker, its own workspace (read-only) and
+# its JiuwenSwarm temporary working directory (see WORK_DIR_RX).
+SANDBOX_READ = (JIUWENSWARM_HOME / "agent" / "workspace" / "skills",
+                JIUWENSWARM_HOME / ".agent_teams" / "agent_groups",
+                JIUWENSWARM_HOME / "agent" / "workspace" / "mcp" / "mcp_hub",
+                JIUWENSWARM_HOME / "agent" / "workspace" / "plugins" / "agent_templates",
+                JIUWENSWARM_HOME / "agent" / "workspace" / "plugins" / "plugin_packages")
+# A team member's "Temporary working directory" (its shell cwd): <team>/team-workspace/artifacts/<date>/<chat>/work/
+# <member>. Anything else offered as the cwd (the server's own directory, when none is set) is not mounted.
+WORK_DIR_RX = re.compile(r"/\.agent_teams/[^/]+/team-workspace/artifacts/[^/]+/[^/]+/work/[^/]+$")
 # The bubblewrap options of each (role, run root) live in a file here, so the command the model sees and keeps in its
 # history is `bwrap --args 3 bash -c '<cmd>' 3< <file>`, not ~2.4k characters of mounts on every shell call
 # (2026-11-09: 103k characters, 11% of a builder's 386k-token context). No sandbox mounts this directory, and the
 # file tools cannot write outside the run root.
 SANDBOX_ARGS_DIR = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "repro-sandbox"
+# uv's cache, shared by every sandboxed shell that can write (builders, tuner, evaluator) across arms and runs, so torch
+# is downloaded once, not once per arm. Its own directory, not ~/.cache/uv: a sandboxed role writes it, and nothing
+# outside the team should install from what a role wrote. Installs copy out of it (UV_LINK_MODE=copy): hardlinks fail
+# across bind mounts anyway, and a hardlinked venv file edited in one arm would change the cache for every other.
+SANDBOX_UV_CACHE = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "repro-uv-cache"
 SECRET_NAME_RX = re.compile(r"(^\.env(\..*)?$|\.(pem|key|p12|pfx)$|^id_(rsa|ed25519|ecdsa)|secret|credential|token)", re.I)
 
 
@@ -144,8 +164,39 @@ def check_path(policy: dict, root: str | None, raw: Any, mode: str, experiment: 
     return str(path)
 
 
-def bwrap_args(policy: dict, root: str, experiment: str | None) -> list[str]:
-    """bubblewrap's options for this role: only its paths mounted, `root` as the working directory."""
+def work_dir_ok(work_dir: str | None, root: str) -> str | None:
+    """`work_dir` (resolved) if it is a team member's JiuwenSwarm temporary working directory that neither holds nor
+    sits inside the run root, else None."""
+    if not work_dir:
+        return None
+    real = Path(os.path.realpath(work_dir))
+    base = Path(os.path.realpath(root))
+    if (not real.is_dir() or not WORK_DIR_RX.search(real.as_posix())
+            or not _within(real, Path(os.path.realpath(JIUWENSWARM_HOME)))
+            or _within(base, real) or _within(real, base)):
+        return None
+    return str(real)
+
+
+def outside_mounts(policy: dict, root: str, own_workspace: str | None, work_dir: str | None) -> list[str]:
+    """bwrap options mounting what JiuwenSwarm tells the worker about outside the run root (see SANDBOX_READ)."""
+    a: list[str] = []
+    base = Path(os.path.realpath(root))
+    ro = [Path(p) for p in SANDBOX_READ] + ([Path(own_workspace)] if own_workspace else [])
+    for p in ro:
+        real = Path(os.path.realpath(p))
+        if real.is_dir() and not _within(base, real) and not _within(real, base):
+            a += ["--ro-bind", str(real), str(p)]
+    wd = work_dir_ok(work_dir, root)
+    if wd:
+        a += ["--bind" if policy.get("shell") == "rw" else "--ro-bind", wd, wd]
+    return a
+
+
+def bwrap_args(policy: dict, root: str, experiment: str | None, own_workspace: str | None = None,
+               work_dir: str | None = None) -> list[str]:
+    """bubblewrap's options for this role: only its paths mounted (plus what JiuwenSwarm advertises to every worker,
+    see SANDBOX_READ), `root` as the working directory."""
     home = Path.home()
     # uv and the Pythons it installed (venvs symlink into them); not the rest of ~/.local/share/uv, which holds
     # uv's stored index credentials
@@ -153,7 +204,7 @@ def bwrap_args(policy: dict, root: str, experiment: str | None) -> list[str]:
     path_env = ":".join([str(uv_bin), "/usr/local/bin", "/usr/bin", "/bin"])
     a = ["--die-with-parent", "--unshare-all", "--clearenv",
          "--setenv", "PATH", path_env, "--setenv", "HOME", "/tmp", "--setenv", "LANG", "C.UTF-8",
-         "--setenv", "UV_CACHE_DIR", "/tmp/uv-cache",
+         "--setenv", "UV_CACHE_DIR", "/tmp/uv-cache", "--setenv", "UV_LINK_MODE", "copy",
          "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib",
          "--symlink", "usr/lib64", "/lib64", "--ro-bind", "/etc", "/etc",
          "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
@@ -167,6 +218,12 @@ def bwrap_args(policy: dict, root: str, experiment: str | None) -> list[str]:
     for p in (uv_bin, uv_share):
         if p.is_dir():
             a += ["--ro-bind", str(p), str(p)]
+    a += outside_mounts(policy, root, own_workspace, work_dir)
+    if policy.get("shell") == "rw":  # read-only shells keep the empty /tmp/uv-cache: they install nothing
+        SANDBOX_UV_CACHE.mkdir(mode=0o700, parents=True, exist_ok=True)
+        cache = str(SANDBOX_UV_CACHE)
+        a[a.index("/tmp/uv-cache")] = cache
+        a += ["--bind", cache, cache]
     base = Path(root)
     for r in prefixes(policy, "read", experiment):
         if (base / r).exists():
@@ -198,10 +255,11 @@ def sandbox_args_file(args: list[str]) -> Path:
     return path
 
 
-def bwrap_command(policy: dict, root: str, cmd: str, experiment: str | None) -> str:
+def bwrap_command(policy: dict, root: str, cmd: str, experiment: str | None, own_workspace: str | None = None,
+                  work_dir: str | None = None) -> str:
     """`cmd` wrapped in bubblewrap with only this role's paths mounted, as a short shell string: the mounts are read
     from a file (`bwrap --args`), so they are not copied into the model's history on every call."""
-    opts = sandbox_args_file(bwrap_args(policy, root, experiment))
+    opts = sandbox_args_file(bwrap_args(policy, root, experiment, own_workspace, work_dir))
     return f"{shlex.join(['bwrap', '--args', '3', 'bash', '-c', cmd])} 3< {shlex.quote(str(opts))}"
 
 
@@ -228,7 +286,7 @@ def unwrap(name: str, args: Any) -> tuple[str, Any, dict | None]:
 
 
 def decide(policy: dict, root: str | None, experiment: str | None, name: str, args: Any,
-           sandbox: str = "bwrap", own_workspace: str | None = None) -> None:
+           sandbox: str = "bwrap", own_workspace: str | None = None, work_dir: str | None = None) -> None:
     """Raise Denied, or return after rewriting `args` in place where needed (shell wrapping, default paths)."""
     name, args, target = unwrap(name, args)
     args = args if isinstance(args, dict) else {}
@@ -262,7 +320,7 @@ def decide(policy: dict, root: str | None, experiment: str | None, name: str, ar
                          "install it, or rebuild the team without --bwrap to run shells unsandboxed")
         if target is None or not isinstance(args.get("command"), str):
             raise Denied("bash needs a `command` string")
-        target["command"] = bwrap_command(policy, root, args["command"], experiment)
+        target["command"] = bwrap_command(policy, root, args["command"], experiment, own_workspace, work_dir)
     elif GPU_RX.search(short):
         op = GPU_RX.search(short).group(1)
         if GPU_LEVEL[policy.get("gpu")] < GPU_LEVEL[GPU_NEED[op]]:
@@ -298,6 +356,17 @@ def unshow(value: Any, wrapped: str, original: str) -> Any:
             except (AttributeError, TypeError, ValueError):
                 pass
     return value
+
+
+def member_work_dir() -> str | None:
+    """This worker's shell cwd as JiuwenSwarm set it (its "Temporary working directory"), or None when unset: not
+    get_cwd(), which falls back to the server's own directory."""
+    try:
+        from openjiuwen.core.sys_operation import cwd as cwd_mod
+        state = cwd_mod._cwd_state.get()
+    except Exception:  # pragma: no cover - another runtime
+        return None
+    return (getattr(state, "original_cwd", None) or getattr(state, "cwd", None)) if state else None
 
 
 def _text(x: Any) -> str:
@@ -381,7 +450,8 @@ class RunPolicyRail(AgentRail):
         _, inner, _ = unwrap(name, args)
         before = inner.get("command") if isinstance(inner, dict) else None
         try:
-            decide(self.policy, self.root, self.experiment, name, args, self.sandbox, self.own_workspace)
+            decide(self.policy, self.root, self.experiment, name, args, self.sandbox, self.own_workspace,
+                   member_work_dir())
             self.count_view(name, args)
         except Denied as exc:
             self._reject(ctx, f"[run policy] {exc}")
@@ -391,19 +461,32 @@ class RunPolicyRail(AgentRail):
             self.shown[after] = before  # after_tool_call puts `before` back where the result echoes `after`
 
     async def after_tool_call(self, ctx) -> None:
-        """Show the model the command it wrote, not its bwrap form: the bash tool echoes the command it ran, and a
-        model that sees `bwrap --args 3 bash -c '...' 3< <file>` copies it, which then fails inside the sandbox (the
-        args file is not mounted there). 2026-11-09: 56 of two builders' 90 shell calls."""
+        """Show the model the command it wrote, not its bwrap form. A model that sees `bwrap --args 3 bash -c '...'
+        3< <file>` copies it, which then fails inside the sandbox (the args file is not mounted there); 2026-11-09:
+        56 of two builders' 90 shell calls. It sees it in two places: the bash tool's echo of the command it ran,
+        and its own earlier call, since the agent writes the rewritten args back into the ToolCall that its
+        history keeps. Both are put back here."""
+        self._restore(ctx, rewrite_result=True)
+
+    async def on_tool_exception(self, ctx) -> None:
+        self._restore(ctx, rewrite_result=False)
+
+    def _restore(self, ctx, rewrite_result: bool) -> None:
         inputs = ctx.inputs
         _, args, _ = unwrap(str(getattr(inputs, "tool_name", "") or ""), getattr(inputs, "tool_args", None))
         wrapped = args.get("command") if isinstance(args, dict) else None
         original = self.shown.pop(wrapped, None) if isinstance(wrapped, str) else None
         if original is None:
             return
-        for field in ("tool_msg", "tool_result"):
-            value = getattr(inputs, field, None)
-            if value is not None:
-                setattr(inputs, field, unshow(value, wrapped, original))
+        args["command"] = original  # the same dict as the history's ToolCall.arguments
+        call = getattr(inputs, "tool_call", None)
+        if call is not None and isinstance(getattr(call, "arguments", None), str):
+            call.arguments = call.arguments.replace(json.dumps(wrapped)[1:-1], json.dumps(original)[1:-1])
+        if rewrite_result:
+            for field in ("tool_msg", "tool_result"):
+                value = getattr(inputs, field, None)
+                if value is not None:
+                    setattr(inputs, field, unshow(value, wrapped, original))
 
     @staticmethod
     def _reject(ctx, message: str) -> None:
