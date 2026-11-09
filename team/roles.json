@@ -1,5 +1,5 @@
 {
-  "_doc": "One expert per flow role. `policy` mirrors framework/tools.py policy_for(): paths are relative to the run root; {experiment} is the experiment named in the builder's instructions. shell: null | ro | rw. gpu: null | ro | run | rw. Every member also gets view_page.",
+  "_doc": "One expert per flow role. `policy` mirrors framework/tools.py policy_for(): paths are relative to the run root; {experiment} is the experiment named in the builder's instructions. shell: null | ro | rw. gpu: null | ro | wait | run | rw. Every member also gets view_page.",
   "leader": {"display_name": {"en": "Reproduction Leader", "zh": "复现团长"},
              "description": "Stages a paper into a run directory and launches the paper-reproducer workflow; does no reproduction work itself."},
   "lead": {"display_name": {"en": "Lead", "zh": "主读者"},
@@ -14,6 +14,9 @@
   "builder": {"display_name": {"en": "Builder", "zh": "实验构建者"},
               "description": "Implements and runs one experiment in repo/arms/<experiment>/ and writes one JSON file per run.",
               "policy": {"read": ["paper.pdf", "scope.txt", "repo"], "write": ["repo/arms/{experiment}"], "shell": "rw", "gpu": "rw", "web": true}},
+  "watch": {"display_name": {"en": "Job Watcher", "zh": "任务看守"},
+            "description": "Waits on one submitted GPU job and reports its status and last output; nothing else.",
+            "policy": {"read": [], "write": [], "shell": null, "gpu": "wait", "web": false}},
   "reviewer": {"display_name": {"en": "Reviewer", "zh": "审查员"},
                "description": "Checks each builder round against the paper and lists what must change.",
                "policy": {"read": ["paper.pdf", "scope.txt", "repo"], "write": [], "shell": "ro", "gpu": "run", "web": true}},

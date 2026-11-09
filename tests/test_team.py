@@ -3,6 +3,8 @@ import importlib.util
 import json
 import os
 import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,6 +26,21 @@ pr = _load(TEAM / "common" / "policy_rail.py", "policy_rail")
 build = _load(TEAM / "build.py", "team_build")
 ROLES = {k: {"role": k, **v["policy"]} for k, v in json.loads((TEAM / "roles.json").read_text()).items()
          if isinstance(v, dict) and "policy" in v}
+
+
+@pytest.fixture(autouse=True)
+def sandbox_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(pr, "SANDBOX_ARGS_DIR", tmp_path / "sandbox-args")
+    return tmp_path / "sandbox-args"
+
+
+def sandbox_argv(command):
+    """The full bwrap argv a wrapped command runs: its options from the `--args` file, then the command."""
+    argv = shlex.split(command)
+    assert argv[:3] == ["bwrap", "--args", "3"] and argv[-2].startswith("3<")
+    opts = Path(argv[-1]).read_bytes().split(b"\0")
+    assert opts[-1] == b""
+    return ["bwrap"] + [o.decode() for o in opts[:-1]] + argv[3:-2]
 
 
 @pytest.fixture
@@ -83,7 +100,8 @@ def test_search_tools_default_to_the_root(run):
 def test_shell_is_wrapped_in_bubblewrap_with_only_the_roles_paths(run, monkeypatch):
     monkeypatch.setattr(pr.shutil, "which", lambda _: "/usr/bin/bwrap")
     args = ok("builder", run, "bash", {"command": "python train.py"}, experiment="exp1")
-    argv = shlex.split(args["command"])
+    assert len(args["command"]) < 200                                 # the mounts stay out of the history
+    argv = sandbox_argv(args["command"])
     assert argv[0] == "bwrap" and argv[-3:] == ["bash", "-c", "python train.py"]
     binds = [(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == "--bind"]
     assert binds == [(f"{run}/repo/arms/exp1", f"{run}/repo/arms/exp1")]
@@ -93,10 +111,36 @@ def test_shell_is_wrapped_in_bubblewrap_with_only_the_roles_paths(run, monkeypat
     resolv = os.path.realpath("/etc/resolv.conf")
     if not resolv.startswith("/etc/") and os.path.isfile(resolv):
         assert resolv in mounted                                      # DNS works when resolv.conf is a symlink
-    audit = shlex.split(ok("audit", run, "bash", {"command": "ls"})["command"])
+    audit = sandbox_argv(ok("audit", run, "bash", {"command": "ls"})["command"])
     assert "--bind" not in audit and "--share-net" not in audit       # read-only, offline
     denied("lead", run, "bash", {"command": "ls"})
     denied("builder", run, "powershell", {"command": "ls"}, experiment="exp1")
+
+
+def test_the_sandbox_args_file_is_private_and_rewritten_when_altered(run, monkeypatch, sandbox_dir):
+    monkeypatch.setattr(pr.shutil, "which", lambda _: "/usr/bin/bwrap")
+    cmd = ok("builder", run, "bash", {"command": "ls"}, experiment="exp1")["command"]
+    path = Path(shlex.split(cmd)[-1])
+    assert path.parent == sandbox_dir and oct(sandbox_dir.stat().st_mode & 0o777) == "0o700"
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    good = path.read_bytes()
+    path.write_bytes(good.replace(b"--unshare-all\0", b""))             # tampered with between calls
+    assert ok("builder", run, "bash", {"command": "pwd"}, experiment="exp1")["command"].endswith(shlex.quote(str(path)))
+    assert path.read_bytes() == good                                   # restored before use
+    audit = shlex.split(ok("audit", run, "bash", {"command": "ls"})["command"])[-1]
+    assert audit != str(path)                                          # each role's mounts in their own file
+
+
+@pytest.mark.skipif(not shutil.which("bwrap"), reason="no bwrap")
+def test_a_wrapped_command_runs_in_the_sandbox(run):
+    cmd = ok("builder", run, "bash", {"command": "pwd; touch repo/arms/exp1/ok; touch repo/eval/no 2>/dev/null "
+                                                 "|| echo ro; ls /proc/self/fd | wc -l"}, experiment="exp1")["command"]
+    r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    if r.returncode and "Operation not permitted" in r.stderr:
+        pytest.skip("bwrap cannot create namespaces here")
+    out = r.stdout.split()
+    assert out[:2] == [run, "ro"] and (Path(run) / "repo/arms/exp1/ok").exists()
+    assert int(out[2]) <= 4                                            # 0-2 and ls's own: the args fd was closed
 
 
 def test_shell_without_bubblewrap_is_refused(run, monkeypatch):
@@ -112,6 +156,15 @@ def test_gpu_tools_by_level_and_path(run):
        {"job_uuid": "j", "files": {"out/m.json": f"{run}/repo/arms/exp1/out/m.json"}}, experiment="exp1")
     denied("builder", run, "mcp_gpurun_download_job_files",
            {"job_uuid": "j", "files": {"out/m.json": f"{run}/repo/eval/m.json"}}, experiment="exp1")
+
+
+def test_the_watcher_can_wait_and_read_output_but_nothing_else(run):
+    for tool in ("mcp_gpurun_gpu_wait", "mcp_gpurun_gpu_status", "mcp_gpurun_gpu_output", "mcp_gpurun_gpu_list"):
+        ok("watch", run, tool, {"job_uuid": "j"})
+    denied("watch", run, "mcp_gpurun_gpu_submit", {"local_dir": f"{run}/repo/arms/exp1", "commands": ["ls"]})
+    denied("watch", run, "mcp_gpurun_gpu_cancel", {"job_uuid": "j"})
+    denied("watch", run, "read_file", {"file_path": f"{run}/paper.pdf"})
+    denied("watch", run, "bash", {"command": "ls"})
 
 
 def test_web_tools_need_web_access(run):
@@ -142,6 +195,8 @@ def test_build_writes_a_package_that_passes_the_publish_rules(tmp_path):
     builder = json.loads((pkg / "agents" / "builder" / "manifest.json").read_text())
     assert builder["rails"] == [{"file": "rails/policy_rail.py", "class": "RunPolicyRail"}]
     assert json.loads((pkg / "agents" / "builder" / "rails" / "policy.json").read_text())["gpu"] == "rw"
+    watch = (pkg / "agents" / "watch" / "persona" / "watch.md").read_text()
+    assert "# Job Watcher" in watch and "# Builder" not in watch  # the watcher no longer borrows the builder
     assert "Rules for everyone" in (pkg / "agents" / "audit" / "persona" / "audit.md").read_text()
     assert (pkg / "skills" / "paper-reproducer" / "scripts" / "workflow.py").read_text() == \
         (ROOT / "flows" / "reproducer_flow.py").read_text()

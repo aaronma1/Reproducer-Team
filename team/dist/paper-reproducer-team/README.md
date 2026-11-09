@@ -42,6 +42,7 @@ lead (claims + one spec per experiment; figure / figure-check read plot-only num
 | lead | reads the paper and scope, lists the claims and writes one runnable spec per experiment |
 | figure, figure-check | read numbers that exist only in plots, twice, independently, from the rendered page |
 | builder | implements and runs one experiment in `repo/arms/<experiment>/`, one JSON file per run |
+| watch | waits on one submitted GPU job and reports its status and last output |
 | reviewer | checks each builder round against the paper and lists what must change |
 | evaluator | computes every claim from the raw run files with its own code in `repo/eval/` |
 | audit | recomputes each claim independently; a disagreement with the evaluator caps the claim |
@@ -65,6 +66,7 @@ Each member except the leader carries `RunPolicyRail`, which checks every tool c
 | lead | paper.pdf, scope.txt | - | - | - | yes |
 | figure, figure-check | paper.pdf, scope.txt | - | - | - | - |
 | builder | paper, repo/ | repo/arms/&lt;experiment&gt;/ | rw | rw | yes |
+| watch | - | - | - | wait | - |
 | reviewer | paper, repo/ | - | ro | run | yes |
 | evaluator | paper, repo/ | repo/eval/ | rw | - | - |
 | audit, judge | paper, repo/ | - | ro | - | - |
@@ -72,8 +74,8 @@ Each member except the leader carries `RunPolicyRail`, which checks every tool c
 | reporter | everything | report.md | - | - | - |
 
 Paths are relative to the run directory. Shell commands run under bubblewrap with only those paths mounted, a
-cleared environment, and the network only for roles with web access. GPU levels: `ro` status/output/list, `run`
-also submit/wait/cancel, `rw` also download. Every member also has `view_page`, which renders a PDF page or a
+cleared environment, and the network only for roles with web access. GPU levels: `ro` status/output/list, `wait`
+also wait, `run` also submit/cancel, `rw` also download. Every member also has `view_page`, which renders a PDF page or a
 cropped panel to a JPEG to open with `read_file`.
 
 ## Layout

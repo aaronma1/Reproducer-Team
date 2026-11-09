@@ -82,6 +82,18 @@ def test_audit_cannot_submit_and_paper_roles_have_no_gpu(ws):
         ws.for_label("builder:a").gpu_submit("builder:a", ".", ["python x.py"])
 
 
+def test_the_watcher_may_wait_but_not_submit_cancel_or_read_files(ws):
+    from framework.agents import gpu_tool_specs
+    w = ws.for_label("watch:j1#2")
+    assert w.gpu("wait") is ws.gpu                       # a later check of the same job
+    with pytest.raises(AccessDenied):
+        w.gpu_submit("watch:j1", "repo", ["python x.py"])
+    with pytest.raises(AccessDenied):
+        w.read_file("paper.pdf")
+    assert {s["function"]["name"] if "function" in s else s["name"] for s in gpu_tool_specs("wait", "")} == \
+        {"gpu_status", "gpu_output", "gpu_list", "gpu_wait"}
+
+
 def test_probe_only_jobs_are_refused():
     from framework.gpu import probe_only
     assert probe_only(["ls arms"]) and probe_only(["cd arms/a && uv sync"]) and probe_only(["uv sync", "nvidia-smi"])

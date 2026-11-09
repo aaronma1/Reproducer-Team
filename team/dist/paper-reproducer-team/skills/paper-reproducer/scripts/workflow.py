@@ -786,20 +786,12 @@ async def resolve_compute(args):
         "download_job_files; the host may prefix their names). If you do, call gpu_list once. Answer "
         "available=true only if gpu_list answered without an error; say in `detail` what you found. Do not submit "
         "anything.", label="gpu-probe", phase="Lead", schema=GPU_PROBE,
-        options={"agent_template": "builder"} if args.get("experts") else None)  # the builder holds the GPU
+        options={"agent_template": "watch"} if args.get("experts") else None)  # GPU tools, nothing else
     ok = bool(probe and probe.get("available"))
     log(f"compute: {'remote (gpu_runner)' if ok else 'local'}: {(probe or {}).get('detail', 'probe gave no answer')}")
     return "remote" if ok else "local"
 
 
-def _watch_opts(args):
-    """The watcher's options: the cheap tier, and with `experts` the team member that holds the GPU tools (it only
-    waits here, so it needs `builder`'s access and nothing else)."""
-    model = (args.get("models") or {}).get("cheap")
-    opts = {"model": model} if model else {}
-    if args.get("experts"):
-        opts["agent_template"] = "builder"
-    return opts or None
 
 
 def _opts(args, role):
@@ -1180,13 +1172,13 @@ async def watch_job(args, eid, job_uuid, n, wait_s):
     no files."""
     per = int(wait_s)
     return await ask(
-        f"Wait for GPU job `{job_uuid}` of experiment `{eid}` and report it. Call gpu_wait with "
-        f"job_uuid={job_uuid} and max_wait_s={per}; if it returns still_running, call it again with the same argument "
-        f"until it is done or about {per} s have passed. Then call gpu_output with job_uuid={job_uuid} "
-        f"and tail_lines=25 and put that text in `tail`. Report `status` exactly as gpu_wait gives it (QUEUED, "
+        f"Wait for GPU job `{job_uuid}` of experiment `{eid}` and report it. Call gpu_wait on that job with "
+        f"max_wait_s={per}; if it returns still_running, call it again with the same argument "
+        f"until it is done or about {per} s have passed. Then call gpu_output on the job "
+        f"with tail_lines=25 and put that text in `tail`. Report `status` exactly as gpu_wait gives it (QUEUED, "
         f"RUNNING, COMPLETED, FAILED, CANCELLED), `exit_code` (null when there is none) and `done` true only when the "
         f"status is not QUEUED or RUNNING. Submit nothing, cancel nothing, read no files, run no commands.",
-        label=_try(f"watch:{job_uuid}", n), schema=WATCH, options=_watch_opts(args))
+        label=_try(f"watch:{job_uuid}", n), schema=WATCH, options=_opts(args, "watch"))
 
 
 async def wait_for_jobs(args, eid, jobs):

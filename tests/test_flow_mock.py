@@ -383,7 +383,7 @@ async def test_experts_hand_each_role_to_its_member():
         return orig(prompt, opts, schema_json, rng)
     be._pick_raw = pick
     await run_workflow(FLOW, args={**ARGS, "experts": True, "compute": "auto"}, backend=be, strict=True)
-    assert seen["gpu-probe"] == "builder"
+    assert seen["gpu-probe"] == "watch"
     assert seen["lead"] == "lead" and seen["builder:main"] == "builder" and seen["reviewer:main"] == "reviewer"
     assert seen["audit:c1"] == "audit" and seen["reporter"] == "reporter"
 async def test_with_a_claim_limit_only_the_selected_claims_are_read_off_figures():
@@ -562,6 +562,7 @@ async def test_a_job_that_never_finishes_is_given_back_to_the_builder():
     assert be.calls.count("watch:j1") == 1 and be.calls.count("watch:j1#2") == 1  # two checks, then it stops
     assert "max_wait_s=60" in be.prompts["watch:j1"]                            # backoff starts short
     assert "max_wait_s=120" in be.prompts["watch:j1#2"]                         # and doubles
+    assert "job_uuid=" not in be.prompts["watch:j1"]                            # names no host's argument spelling
     assert "is still QUEUED after 180 s of waiting" in be.prompts["builder:main#2"]
     assert "do not resubmit it" in be.prompts["builder:main#2"]
 

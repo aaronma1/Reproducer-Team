@@ -153,15 +153,18 @@ def gpu_tool_specs(mode: str, hardware: str) -> list[dict]:
          _fn("gpu_output", "stdout/stderr of a GPU job so far (works while it runs); tail_lines 0 = all.",
              {**job, "tail_lines": {"type": "integer"}}),
          _fn("gpu_list", "This run's GPU jobs and their status.", {})]
+    wait = _fn("gpu_wait", "Block until the job finishes or max_wait_s passes (at most 1800). It keeps running "
+                           "either way; never resubmit because a wait timed out.",
+               {**job, "max_wait_s": {"type": "integer"}})
+    if mode == "wait":
+        t.append(wait)
     if mode in ("run", "rw"):
         guide = GPU_GUIDE.format(hw=hardware or "GPU")
         if mode == "run":
             guide += ("\nYou are a reviewer: submit only a short check (minutes) when your own shell lacks a library "
                       "the code needs. You cannot download job files; read the output with gpu_output.")
         t += [_fn("gpu_submit", guide, {"path": s, "commands": {"type": "array", "items": s}, "tag": s}),
-              _fn("gpu_wait", "Block until the job finishes or max_wait_s passes (at most 1800). It keeps running "
-                              "either way; never resubmit because a wait timed out.",
-                  {**job, "max_wait_s": {"type": "integer"}}),
+              wait,
               _fn("gpu_cancel", "Cancel a queued or running GPU job" + (" you submitted." if mode == "run" else "."), job)]
     if mode == "rw":
         t.append(_fn("gpu_download", "Copy files or directories from the job dir (paths relative to it) into `dest`, a "
@@ -441,7 +444,7 @@ class Agent:
                 paths = args["paths"]
                 return sc.gpu_download(args["job"], [paths] if isinstance(paths, str) else list(paths), args["dest"])
             if name == "gpu_wait":
-                return sc.gpu("run").wait(args["job"], int(args.get("max_wait_s") or 600))
+                return sc.gpu("wait").wait(args["job"], int(args.get("max_wait_s") or 600))
             if name == "gpu_cancel":
                 return sc.gpu_cancel(self.label, args["job"])
             if name == "gpu_status":

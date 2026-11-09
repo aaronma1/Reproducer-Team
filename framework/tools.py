@@ -87,8 +87,8 @@ class Policy:
     read: tuple[str, ...]  # workspace-relative prefixes ("" = everything not denied)
     write: tuple[str, ...] = ()
     shell: str | None = None  # None | "ro" | "rw"
-    gpu: str | None = None  # None | "ro" (status, output, list) | "run" (also submit, wait, cancel its own
-    #                         jobs: a reviewer's short check) | "rw" (also download, cancel any of the run's jobs)
+    gpu: str | None = None  # None | "ro" (status, output, list) | "wait" (also wait: the job watcher) | "run" (also
+    #                         submit, cancel its own jobs: a reviewer's short check) | "rw" (also download, cancel any)
     web: bool = False  # web_search / web_fetch (libraries, environments and references the paper cites)
 
 
@@ -103,6 +103,7 @@ def policy_for(label: str) -> tuple[str, Policy]:
         "builder": Policy(read=PAPER_FILES + repo, write=(f"repo/arms/{arm}",) if arm else (), shell="rw", gpu="rw",
                           web=True),
         "reviewer": Policy(read=PAPER_FILES + repo, shell="ro", gpu="run", web=True),
+        "watch": Policy(read=(), gpu="wait"),  # waits on one job and reports it; nothing else
         "evaluator": Policy(read=PAPER_FILES + repo, write=("repo/eval",), shell="rw"),
         "audit": Policy(read=PAPER_FILES + repo, shell="ro"),
         "tuner": Policy(read=PAPER_FILES + repo, write=("repo/tuned",), shell="rw", gpu="rw", web=True),
@@ -266,13 +267,13 @@ class Scope:
         return sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir() if not p.is_symlink())
 
     # ---- gpu ---------------------------------------------------------------
-    _GPU_LEVEL = {None: 0, "ro": 1, "run": 2, "rw": 3}
+    _GPU_LEVEL = {None: 0, "ro": 1, "wait": 2, "run": 3, "rw": 4}
 
     def gpu(self, need: str = "ro"):
         if self.ws.gpu is None:
             raise AccessDenied("this run has no GPU")
         if self._GPU_LEVEL[self.policy.gpu] < self._GPU_LEVEL[need]:
-            what = {"ro": "see", "run": "submit", "rw": "download or change"}[need]
+            what = {"ro": "see", "wait": "wait for", "run": "submit", "rw": "download or change"}[need]
             raise AccessDenied(f"{self.role} may not {what} GPU jobs")
         return self.ws.gpu
 

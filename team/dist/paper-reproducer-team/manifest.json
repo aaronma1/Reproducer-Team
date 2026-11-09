@@ -13,6 +13,7 @@
     "figure",
     "figure-check",
     "builder",
+    "watch",
     "reviewer",
     "evaluator",
     "audit",

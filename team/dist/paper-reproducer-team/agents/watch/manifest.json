@@ -1,0 +1,24 @@
+{
+  "package_type": "agent_template",
+  "name": "watch",
+  "display_name": {
+    "en": "Job Watcher",
+    "zh": "任务看守"
+  },
+  "description": "Waits on one submitted GPU job and reports its status and last output; nothing else.",
+  "persona": {
+    "dir": "persona"
+  },
+  "tools": [
+    {
+      "file": "tools/view_page.py",
+      "class": "ViewPage"
+    }
+  ],
+  "rails": [
+    {
+      "file": "rails/policy_rail.py",
+      "class": "RunPolicyRail"
+    }
+  ]
+}

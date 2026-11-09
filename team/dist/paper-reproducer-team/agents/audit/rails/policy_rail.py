@@ -11,14 +11,15 @@ The JiuwenSwarm port of ``framework/tools.py``: the role table lives in ``policy
   Until the root is known, file, shell and GPU tools are refused.
 - Shell commands run under bubblewrap with only the role's paths mounted (read-only, or read-write for its write
   prefixes), a cleared environment, and the network only for roles with web access.
-- GPU tools (the gpu_runner MCP, any host prefix) are allowed by level: ro (status, output, list), run (also
-  submit, wait, cancel), rw (also download_job_files). Submitted dirs must be readable, download targets writable.
+- GPU tools (the gpu_runner MCP, any host prefix) are allowed by level: ro (status, output, list), wait (also
+  wait), run (also submit, cancel), rw (also download_job_files). Submitted dirs must be readable, download targets writable.
 - Web tools need ``web``. Other tools (todo, skills, structured_output, tool_search) pass.
 
 Progressive tool exposure wraps calls as ``tool_call {"name", "args"}``; the inner call is checked.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -41,9 +42,9 @@ WRITE_TOOLS = {"write_file", "edit_file", "search_replace", "write"}
 SHELL_TOOLS = {"bash", "powershell", "mcp_exec_command", "create_terminal", "code"}
 WEB_TOOLS = {"mcp_free_search", "mcp_paid_search", "mcp_fetch_webpage", "web_search", "web_fetch"}
 GPU_RX = re.compile(r"(?:^|_)(gpu_submit|gpu_status|gpu_output|gpu_wait|gpu_cancel|gpu_list|download_job_files)$")
-GPU_NEED = {"gpu_status": "ro", "gpu_output": "ro", "gpu_list": "ro", "gpu_submit": "run", "gpu_wait": "run",
+GPU_NEED = {"gpu_status": "ro", "gpu_output": "ro", "gpu_list": "ro", "gpu_submit": "run", "gpu_wait": "wait",
             "gpu_cancel": "run", "download_job_files": "rw"}
-GPU_LEVEL = {None: 0, "ro": 1, "run": 2, "rw": 3}
+GPU_LEVEL = {None: 0, "ro": 1, "wait": 2, "run": 3, "rw": 4}
 EXTRA_READ = (".pages",)  # view_page renders pages here
 # view_page calls per turn (one flow call, or one session turn). The headless runner capped it at 6 after figure
 # readers zoomed into ever thinner slivers 60+ times in one turn (2026-11-03); a policy may set its own max_views.
@@ -54,6 +55,11 @@ JIUWENSWARM_HOME = Path(os.environ.get("JIUWENSWARM_HOME", "~/.jiuwenswarm")).ex
 OUTSIDE_READ = (JIUWENSWARM_HOME / "agent" / "workspace" / "skills",
                 JIUWENSWARM_HOME / "agent" / "workspace" / "mcp",
                 JIUWENSWARM_HOME / ".agent_teams" / "agent_groups")
+# The bubblewrap options of each (role, run root) live in a file here, so the command the model sees and keeps in its
+# history is `bwrap --args 3 bash -c '<cmd>' 3< <file>`, not ~2.4k characters of mounts on every shell call
+# (2026-11-09: 103k characters, 11% of a builder's 386k-token context). No sandbox mounts this directory, and the
+# file tools cannot write outside the run root.
+SANDBOX_ARGS_DIR = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "repro-sandbox"
 SECRET_NAME_RX = re.compile(r"(^\.env(\..*)?$|\.(pem|key|p12|pfx)$|^id_(rsa|ed25519|ecdsa)|secret|credential|token)", re.I)
 
 
@@ -131,14 +137,14 @@ def check_path(policy: dict, root: str | None, raw: Any, mode: str, experiment: 
     return str(path)
 
 
-def bwrap_command(policy: dict, root: str, cmd: str, experiment: str | None) -> str:
-    """`cmd` wrapped in bubblewrap with only this role's paths mounted, as a shell string."""
+def bwrap_args(policy: dict, root: str, experiment: str | None) -> list[str]:
+    """bubblewrap's options for this role: only its paths mounted, `root` as the working directory."""
     home = Path.home()
     # uv and the Pythons it installed (venvs symlink into them); not the rest of ~/.local/share/uv, which holds
     # uv's stored index credentials
     uv_bin, uv_share = home / ".local" / "bin", home / ".local" / "share" / "uv" / "python"
     path_env = ":".join([str(uv_bin), "/usr/local/bin", "/usr/bin", "/bin"])
-    a = ["bwrap", "--die-with-parent", "--unshare-all", "--clearenv",
+    a = ["--die-with-parent", "--unshare-all", "--clearenv",
          "--setenv", "PATH", path_env, "--setenv", "HOME", "/tmp", "--setenv", "LANG", "C.UTF-8",
          "--setenv", "UV_CACHE_DIR", "/tmp/uv-cache",
          "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib",
@@ -162,8 +168,34 @@ def bwrap_command(policy: dict, root: str, cmd: str, experiment: str | None) -> 
         for r in prefixes(policy, "write", experiment):
             (base / r).mkdir(parents=True, exist_ok=True)
             a += ["--bind", str(base / r), str(base / r)]
-    a += ["--chdir", root, "bash", "-c", cmd]
-    return shlex.join(a)
+    return a + ["--chdir", root]
+
+
+def sandbox_args_file(args: list[str]) -> Path:
+    """The file holding `args` NUL-separated (for `bwrap --args`), named by its content. It is rewritten whenever its
+    content differs, so a stale or altered file is never used as found. bwrap closes the fd once it has read it, so
+    the sandboxed command cannot reach the file through /proc/self/fd."""
+    data = b"".join(a.encode() + b"\0" for a in args)
+    path = SANDBOX_ARGS_DIR / f"{hashlib.sha256(data).hexdigest()[:32]}.args"
+    try:
+        if path.read_bytes() == data:
+            return path
+    except OSError:
+        pass
+    SANDBOX_ARGS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(SANDBOX_ARGS_DIR, 0o700)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+    return path
+
+
+def bwrap_command(policy: dict, root: str, cmd: str, experiment: str | None) -> str:
+    """`cmd` wrapped in bubblewrap with only this role's paths mounted, as a short shell string: the mounts are read
+    from a file (`bwrap --args`), so they are not copied into the model's history on every call."""
+    opts = sandbox_args_file(bwrap_args(policy, root, experiment))
+    return f"{shlex.join(['bwrap', '--args', '3', 'bash', '-c', cmd])} 3< {shlex.quote(str(opts))}"
 
 
 def unwrap(name: str, args: Any) -> tuple[str, Any, dict | None]:
@@ -213,7 +245,7 @@ def decide(policy: dict, root: str | None, experiment: str | None, name: str, ar
     elif GPU_RX.search(short):
         op = GPU_RX.search(short).group(1)
         if GPU_LEVEL[policy.get("gpu")] < GPU_LEVEL[GPU_NEED[op]]:
-            what = {"ro": "see", "run": "submit or wait for", "rw": "download"}[GPU_NEED[op]]
+            what = {"ro": "see", "wait": "wait for", "run": "submit", "rw": "download"}[GPU_NEED[op]]
             raise Denied(f"{policy.get('role')} may not {what} GPU jobs")
         if op == "gpu_submit":
             check_path(policy, root, args.get("local_dir"), "read", experiment)  # uploads: run root only

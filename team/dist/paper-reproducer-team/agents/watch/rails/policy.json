@@ -1,0 +1,8 @@
+{
+  "role": "watch",
+  "read": [],
+  "write": [],
+  "shell": null,
+  "gpu": "wait",
+  "web": false
+}
