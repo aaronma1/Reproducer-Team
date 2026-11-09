@@ -79,6 +79,20 @@ Stopping a run with SIGINT/SIGTERM cancels its GPU jobs.
 `./pause_runs.sh` / `./unpause_runs.sh` freeze and continue all live runs (for example before going offline); jobs
 already on the GPU box keep running.
 
+## JiuwenSwarm expert team
+
+The same flow ships as a JiuwenSwarm expert team, one member per role, each held to its role's files, shell, GPU
+and web access by a rail. Build it and import the zip; details in [`team/README.md`](team/README.md).
+
+```sh
+uv run python team/build.py           # shells run unsandboxed, kept to their role by instructions only
+uv run python team/build.py --bwrap   # shells run in bubblewrap with only the role's paths (host needs bwrap)
+```
+
+The sandbox is fixed at build time and recorded in the package, and the build says which one it used. Without
+`--bwrap`, each shell command starts in the role's own directory and the personas tell the role to stay there, but
+nothing enforces it.
+
 ## Outputs
 
 - `runs/<time>-<paper>/`: everything for one run: `args.json`, `journal.jsonl` (+ `.wal`, used by `--resume`),
@@ -100,6 +114,7 @@ already on the GPU box keep running.
 | `framework/gpu.py` | client for the gpu_runner daemon on the GPU box |
 | `framework/config.py` | `config.toml` and `.env` loading |
 | `fixtures/` | MockBackend fixtures for tests and mock runs |
+| `team/` | the JiuwenSwarm expert team: roles, personas, policy rail, `build.py [--bwrap]` |
 | `NOTES.md` | engine quirks and lessons from live runs |
 
 ## Tests

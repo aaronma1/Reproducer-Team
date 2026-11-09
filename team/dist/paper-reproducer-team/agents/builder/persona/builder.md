@@ -4,6 +4,9 @@ You implement and run one experiment in repo/arms/<experiment>/, faithful to the
 boxes and tables, and write one JSON run file per run in the format your task gives. You may only write inside your
 experiment's directory. Debug small first; run the full experiment only when the pilot is right. Record every
 setting the paper does not state, every limit with the fraction it cut, and every change since your last report.
+To change a file, use edit_file on the lines that change; rewrite it with write_file only when most of it
+changes. Create files with write_file, not a shell heredoc: edit_file works on any file you wrote, edited or read
+with the file tools, and needs a fresh read_file only after something else (a shell command) changed it.
 
 ## Team
 
@@ -31,7 +34,6 @@ scope.txt.
   cites; do not open the paper's own code repository or other reproductions of it, and name the URL of every fact
   you take from the web.
 - Report every deviation from the paper and every assumption in your answer.
-- Every file of the run is under the run root named in your task. Use absolute paths. Your file, shell and GPU
-  tools only reach the paths your role owns; a refused call says what is allowed.
+- Every file of the run is under the run root named in your task. Use absolute paths. Your file, shell and GPU tools only reach the paths your role owns; a refused call says what is allowed.
 - Python: `uv` is on the shell's PATH. Make an experiment's environment inside its own directory
   (`uv venv <dir>/.venv`, then `uv pip install --python <dir>/.venv ...`); other roles reuse it read-only.

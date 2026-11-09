@@ -55,6 +55,47 @@ SANDBOX_NOTE = {
 }
 
 
+# Persona sentences that are true only for one sandbox mode, as {{name}} placeholders in team/personas/*.md.
+PERSONA_TEXT = {
+    "bwrap": {
+        "tool_reach": "Your file, shell and GPU tools only reach the paths your role owns; a refused call says what "
+                      "is allowed.",
+        "shell_ro": "is read-only",
+    },
+    "none": {
+        "tool_reach": "Your file and GPU tools only reach the paths your role owns, and a refused call says what is "
+                      "allowed; your shell is not confined (see \"Your shell\" below).",
+        "shell_ro": "must not change any file (nothing enforces it in this build; see \"Your shell\")",
+    },
+}
+PLACEHOLDER_RX = re.compile(r"\{\{(\w+)\}\}")
+
+
+def render(text: str, sandbox: str) -> str:
+    """Fill the sandbox-dependent {{placeholders}} of a persona."""
+    return PLACEHOLDER_RX.sub(lambda m: PERSONA_TEXT[sandbox][m.group(1)], text)
+
+
+def shell_note(policy: dict) -> str:
+    """Persona section for a member whose shell runs unsandboxed: nothing but these instructions keeps it to its
+    role's paths, so say exactly which ones (the rail starts each command in the directory named here)."""
+    paths = lambda ps: ", ".join(f"`{p.replace('{experiment}', '<experiment>')}" + ("" if "." in p else "/") + "`"
+                                 for p in ps) or "nothing"
+    if policy["shell"] == "rw":
+        home = f"your own directory, {paths(policy['write'][:1])} under the run directory"
+        writes = f"Create, change and delete files only inside {paths(policy['write'])}."
+    else:
+        home = "the run directory"
+        writes = "Do not create, change or delete any file with it: your shell is read-only by instruction."
+    net = ("Use the network only for what your task needs (packages, the references the paper cites)."
+           if policy.get("web") else "Do not use the network.")
+    return (f"## Your shell\n\nThis team was built without a shell sandbox: your shell commands run on the host "
+            f"exactly as you write them, and the role rules above bind only the file tools. Each command starts in "
+            f"{home}; stay there. {writes} Read only {paths(policy['read'])} under the run directory, by absolute "
+            f"path. Never read or touch anything outside the run directory: not your home directory, not "
+            f"JiuwenSwarm's own files (its config holds API keys), not other runs or teams. {net}\n")
+
+
 def readme(sandbox: str = "none") -> str:
     """team/README.md with the results table inserted right after its title, as the team's detail page shows it, and
     a line saying how this build runs shell commands."""
@@ -73,6 +114,9 @@ def build(out: Path, sandbox: str = "none") -> Path:
     for role, spec in roles.items():
         d = pkg / "agents" / role
         persona = (HERE / "personas" / f"{role}.md").read_text(encoding="utf-8").rstrip() + "\n\n" + team_md
+        if sandbox == "none" and (spec.get("policy") or {}).get("shell"):
+            persona = persona.rstrip() + "\n\n" + shell_note(spec["policy"])
+        persona = render(persona, sandbox)
         (d / "persona").mkdir(parents=True)
         (d / "persona" / f"{role}.md").write_text(persona, encoding="utf-8")
         manifest = {"package_type": "agent_template", "name": role, "display_name": spec["display_name"],
@@ -123,7 +167,9 @@ def check(pkg: Path) -> None:
     for a in agents:
         m = json.loads((pkg / "agents" / a / "manifest.json").read_text(encoding="utf-8"))
         assert m["package_type"] == "agent_template", a
-        assert any((pkg / "agents" / a / m["persona"]["dir"]).glob("*.md")), f"{a}: persona needs Markdown"
+        personas = list((pkg / "agents" / a / m["persona"]["dir"]).glob("*.md"))
+        assert personas, f"{a}: persona needs Markdown"
+        assert not any(PLACEHOLDER_RX.search(p.read_text(encoding="utf-8")) for p in personas), f"{a}: {{{{placeholder}}}} left"
         for entry in m.get("tools", []) + m.get("rails", []):
             assert (pkg / "agents" / a / entry["file"]).is_file(), f"{a}: missing {entry['file']}"
         policy = pkg / "agents" / a / "rails" / "policy.json"

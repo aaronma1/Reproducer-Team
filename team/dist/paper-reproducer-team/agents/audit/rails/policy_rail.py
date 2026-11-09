@@ -12,7 +12,8 @@ The JiuwenSwarm port of ``framework/tools.py``: the role table lives in ``policy
 - Shell commands: with ``"sandbox": "bwrap"`` in ``policy.json`` (``team/build.py --bwrap``) they run under
   bubblewrap with only the role's paths mounted (read-only, or read-write for its write prefixes), a cleared
   environment, and the network only for roles with web access; a missing ``bwrap`` then refuses every shell call.
-  With ``"sandbox": "none"`` (the default build) they run as given: the role's paths bind the file tools only.
+  With ``"sandbox": "none"`` (the default build) they run as given, starting in the role's own directory (the bash
+  tool's ``workdir``): the role's paths bind the file tools only, and the persona asks the role to stay there.
 - GPU tools (the gpu_runner MCP, any host prefix) are allowed by level: ro (status, output, list), wait (also
   wait), run (also submit, cancel), rw (also download_job_files). Submitted dirs must be readable, download targets writable.
 - Web tools need ``web``. Other tools (todo, skills, structured_output, tool_search) pass.
@@ -204,6 +205,17 @@ def bwrap_command(policy: dict, root: str, cmd: str, experiment: str | None) -> 
     return f"{shlex.join(['bwrap', '--args', '3', 'bash', '-c', cmd])} 3< {shlex.quote(str(opts))}"
 
 
+def shell_home(policy: dict, root: str, experiment: str | None) -> Path:
+    """Where an unsandboxed shell command starts: the role's own writable directory (a builder's
+    repo/arms/<experiment>, the evaluator's repo/eval, ...), created if missing; the run root for a read-only shell."""
+    base = Path(root)
+    if policy.get("shell") == "rw":
+        for w in prefixes(policy, "write", experiment):
+            (base / w).mkdir(parents=True, exist_ok=True)
+            return base / w
+    return base
+
+
 def unwrap(name: str, args: Any) -> tuple[str, Any, dict | None]:
     """(tool name, its args, the dict to rewrite in place) for a direct or a `tool_call`-wrapped call."""
     if name == "tool_call" and isinstance(args, dict) and isinstance(args.get("name"), str):
@@ -241,7 +253,9 @@ def decide(policy: dict, root: str | None, experiment: str | None, name: str, ar
             raise Denied(f"use bash; {short} is not sandboxed for this team")
         if not root:
             raise Denied("the run root is not known yet")
-        if sandbox == "none":
+        if sandbox == "none":  # nothing confines the command; start it in the role's own directory
+            if target is not None and not args.get("workdir"):
+                target["workdir"] = str(shell_home(policy, root, experiment))
             return
         if not shutil.which("bwrap"):
             raise Denied("this team was built with --bwrap but bubblewrap (bwrap) is not installed on this host; "

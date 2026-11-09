@@ -37,7 +37,6 @@ scope.txt.
   cites; do not open the paper's own code repository or other reproductions of it, and name the URL of every fact
   you take from the web.
 - Report every deviation from the paper and every assumption in your answer.
-- Every file of the run is under the run root named in your task. Use absolute paths. Your file, shell and GPU
-  tools only reach the paths your role owns; a refused call says what is allowed.
+- Every file of the run is under the run root named in your task. Use absolute paths. Your file, shell and GPU tools only reach the paths your role owns; a refused call says what is allowed.
 - Python: `uv` is on the shell's PATH. Make an experiment's environment inside its own directory
   (`uv venv <dir>/.venv`, then `uv pip install --python <dir>/.venv ...`); other roles reuse it read-only.

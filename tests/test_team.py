@@ -153,7 +153,16 @@ def test_a_team_built_without_bwrap_runs_shells_as_given_but_keeps_the_other_rul
     monkeypatch.setattr(pr.shutil, "which", lambda _: None)           # bwrap is not needed at all
     args = {"command": "python train.py"}
     pr.decide(ROLES["builder"], run, "exp1", "bash", args, sandbox="none")
-    assert args == {"command": "python train.py"}                      # not rewritten
+    assert args == {"command": "python train.py", "workdir": f"{run}/repo/arms/exp1"}   # starts in its own dir
+    new = {"command": "ls"}
+    pr.decide(ROLES["builder"], run, "exp2", "bash", new, sandbox="none")
+    assert new["workdir"] == f"{run}/repo/arms/exp2" and Path(new["workdir"]).is_dir()  # created if missing
+    wrapped = {"name": "bash", "args": {"command": "ls"}}
+    pr.decide(ROLES["audit"], run, None, "tool_call", wrapped, sandbox="none")
+    assert wrapped["args"]["workdir"] == run                            # a read-only shell starts in the run root
+    chosen = {"command": "ls", "workdir": f"{run}/repo"}
+    pr.decide(ROLES["evaluator"], run, None, "bash", chosen, sandbox="none")
+    assert chosen["workdir"] == f"{run}/repo"                           # a workdir the model chose is kept
     with pytest.raises(pr.Denied):
         pr.decide(ROLES["lead"], run, None, "bash", {"command": "ls"}, sandbox="none")       # still no shell
     with pytest.raises(pr.Denied):
@@ -233,6 +242,24 @@ def test_build_writes_the_shell_sandbox_into_every_policy_and_the_readme(tmp_pat
     assert {json.loads(p.read_text())["sandbox"] for p in policies} == {sandbox}
     head = (pkg / "README.md").read_text().split("## Results so far")[0]
     assert ("bubblewrap" if sandbox == "bwrap" else "Shell sandbox: none") in head
+    persona = lambda r: (pkg / "agents" / r / "persona" / f"{r}.md").read_text()
+    assert not any("{{" in persona(r) for r in ROLES)                   # every placeholder filled
+    assert all("use edit_file on the lines that change" in persona(r) for r in ("builder", "tuner", "evaluator"))
+    if sandbox == "bwrap":
+        assert not any("## Your shell" in persona(r) for r in ROLES)
+        assert "Your file, shell and GPU tools only reach" in persona("builder")
+        assert "your shell is read-only." in persona("reviewer") and "Your\nshell is read-only:" in persona("audit")
+        return
+    assert "shell and GPU tools only reach" not in persona("builder")   # no claim the shell is confined
+    assert "your shell is not confined" in persona("builder")
+    assert "is read-only" not in persona("reviewer").split("## Your shell")[0]
+    assert "must not change any file" in persona("audit")
+    assert "## Your shell" not in persona("lead") and "## Your shell" not in persona("watch")   # no shell at all
+    builder = persona("builder")
+    assert "starts in your own directory, `repo/arms/<experiment>/`" in builder and "network only" in builder
+    audit = persona("audit")
+    assert "starts in the run directory" in audit and "read-only by instruction" in audit
+    assert "Do not use the network" in audit and "`paper.pdf`, `scope.txt`, `repo/`" in audit
 
 
 @pytest.fixture

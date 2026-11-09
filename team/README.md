@@ -87,7 +87,9 @@ python team/build.py --bwrap        # members' shells run in a bubblewrap sandbo
    (or the directory).
 2. Optional GPU: install https://github.com/aaronma1/gpu_runner (`make install` and `gpu_runner daemon` on the GPU
    machine, `make install-mcp` on this one), then add it as a stdio MCP server in JiuwenSwarm (Connectors): command
-   = the gpu_runner venv's `python`, argument = `gpu_runner_mcp.py`. Without it, runs use local CPU.
+   = the gpu_runner venv's `python`, argument = `gpu_runner_mcp.py`. Set its timeout (`timeout_s`) to 1900 s:
+   JiuwenSwarm cuts a stdio MCP call off at 60 s by default, so a longer `gpu_wait` fails and the job watcher falls
+   back to a model call every ~45 s. Without gpu_runner, runs use local CPU.
 3. Turn on SwarmFlow (`/swarmflow on`, then `/new`), bind the team to the session, and ask the leader to reproduce
    a paper.
 
@@ -96,10 +98,28 @@ Optional skill args: `"smoke": true, "max_claims": 1` for a short check run, `bu
 `"models": {"strong": ..., "cheap": ...}` (workers on `strong`, checkers on `cheap`, so no agent checks its own
 model's work). See `skill/SKILL.md`.
 
-The host needs `uv` in `~/.local/bin` for Python environments. The shell sandbox is chosen when the team is built:
-`python team/build.py --bwrap` confines every member's shell with bubblewrap, and the host then needs `bwrap`
-installed (a missing one refuses every shell call, with a message saying so). A plain `python team/build.py` builds
-a team whose shell commands run unsandboxed, and says so when it builds and at the top of the package README.
+The host needs `uv` in `~/.local/bin` for Python environments.
+
+### Shell sandbox: `--bwrap`
+
+The shell sandbox is chosen when the team is built and written into every member's `rails/policy.json`
+(`"sandbox": "bwrap"` or `"none"`). The build prints which one it used, and the package README says it in its first
+line, so an imported team shows its mode.
+
+| | `python team/build.py --bwrap` | `python team/build.py` (default) |
+| --- | --- | --- |
+| Host needs | `bwrap` (bubblewrap); without it every shell call is refused, with a message saying why | nothing extra |
+| A shell command | runs in bubblewrap with only the role's paths mounted (read-only, its write directory read-write), a cleared environment, network only for roles with web access | runs on the host as written |
+| Starts in | the run directory | the role's own directory: a builder's `repo/arms/<experiment>/`, the evaluator's `repo/eval/`, the tuner's `repo/tuned/`; the run directory for read-only shells |
+| Role paths bind | file tools and shell | file tools only |
+| Personas say | "your file, shell and GPU tools only reach the paths your role owns"; "your shell is read-only" | the shell is not confined; a "Your shell" section names the role's directory, what it may write and read, and asks it to stay there, keep away from JiuwenSwarm's own files (its config holds API keys) and use the network only if its role has web access |
+
+Without `--bwrap` those instructions are all that keeps a shell to its role: use it only on a host where that is
+acceptable. JiuwenSwarm itself does not sandbox shells unless its own jiuwenbox sandbox is turned on
+(`/sandbox enable`), whose default policy mounts the whole filesystem read-only, makes the agent workspace writable,
+and keeps the host network. With `--bwrap`, the mounts of each role live in a private file under
+`~/.cache/repro-sandbox/` (`bwrap --args`), so a shell call in the model's history is the command plus about 150
+characters, not 2.4k characters of mounts.
 
 ## Publish
 

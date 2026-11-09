@@ -757,8 +757,8 @@ def _where():
     if not root:
         return ""
     return (f"All files of this run are under {root}. Every relative path in this task (paper.pdf, scope.txt, "
-            f"repo/..., report.md) means {root}/<path>: give your file tools absolute paths and `cd {root}` before "
-            "shell commands. Do not write outside it.\n\n")
+            f"repo/..., report.md) means {root}/<path>: give your file tools and shell commands absolute paths. "
+            "Do not write outside it.\n\n")
 
 
 async def ask(prompt, **kw):
