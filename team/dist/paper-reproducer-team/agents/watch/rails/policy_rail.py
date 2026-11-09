@@ -53,24 +53,39 @@ EXTRA_READ = (".pages",)  # view_page renders pages here
 # view_page calls per turn (one flow call, or one session turn). The headless runner capped it at 6 after figure
 # readers zoomed into ever thinner slivers 60+ times in one turn (2026-11-03); a policy may set its own max_views.
 MAX_VIEWS = 12
-JIUWENSWARM_HOME = Path(os.environ.get("JIUWENSWARM_HOME", "~/.jiuwenswarm")).expanduser()
-# Outside the run root a role may only read these (plus its own workspace, learned in init): the shared skill
-# library, MCP server definitions, and installed expert-team packages. Never config/ (model API keys), auth/, .env.
-OUTSIDE_READ = (JIUWENSWARM_HOME / "agent" / "workspace" / "skills",
-                JIUWENSWARM_HOME / "agent" / "workspace" / "mcp",
-                JIUWENSWARM_HOME / ".agent_teams" / "agent_groups",
-                JIUWENSWARM_HOME / "agent" / "workspace" / "plugins" / "agent_templates",
-                JIUWENSWARM_HOME / "agent" / "workspace" / "plugins" / "plugin_packages")
-# What the sandbox mounts read-only outside the run root: the directories JiuwenSwarm's prompt names to every
-# worker ("Installed Skill root", "Installed Agent groups", ...), so a path the model was told about exists in its
-# shell too. Only mcp_hub of mcp/, whose credentials/ sits next to it (bwrap cannot filter by name the way
-# check_outside_read does), and never config/ (model API keys). Plus, per worker, its own workspace (read-only) and
-# its JiuwenSwarm temporary working directory (see WORK_DIR_RX).
-SANDBOX_READ = (JIUWENSWARM_HOME / "agent" / "workspace" / "skills",
-                JIUWENSWARM_HOME / ".agent_teams" / "agent_groups",
-                JIUWENSWARM_HOME / "agent" / "workspace" / "mcp" / "mcp_hub",
-                JIUWENSWARM_HOME / "agent" / "workspace" / "plugins" / "agent_templates",
-                JIUWENSWARM_HOME / "agent" / "workspace" / "plugins" / "plugin_packages")
+def jiuwen_dirs() -> tuple[Path, Path]:
+    """(agent workspace, data dir) of the running JiuwenSwarm, asked at call time from JiuwenSwarm itself - the same
+    helpers its prompt uses to name these paths, so they follow JIUWENSWARM_DATA_DIR, named instances and tenants.
+    Outside JiuwenSwarm (tests, the headless runner): JIUWENSWARM_DATA_DIR, else ~/.jiuwenswarm, as it resolves them.
+    (JIUWENSWARM_HOME is JiuwenSwarm's override of the user's home, the parent of .jiuwenswarm, not the data dir.)"""
+    try:
+        from jiuwenswarm.common.utils import get_agent_workspace_dir, get_user_workspace_dir
+        return Path(get_agent_workspace_dir()), Path(get_user_workspace_dir())
+    except Exception:
+        data = os.environ.get("JIUWENSWARM_DATA_DIR") or (
+            Path(os.environ.get("JIUWENSWARM_HOME") or Path.home()) / ".jiuwenswarm")
+        data = Path(data).expanduser()
+        return data / "agent" / "workspace", data
+
+
+def outside_read() -> tuple[Path, ...]:
+    """Outside the run root a role may only read these (plus its own workspace, learned in init): the shared skill
+    library, MCP server definitions, installed expert-team packages, agent templates and plugin packages. Never
+    config/ (model API keys), auth/, .env."""
+    ws, data = jiuwen_dirs()
+    return (ws / "skills", ws / "mcp", data / ".agent_teams" / "agent_groups",
+            ws / "plugins" / "agent_templates", ws / "plugins" / "plugin_packages")
+
+
+def sandbox_read() -> tuple[Path, ...]:
+    """What the sandbox mounts read-only outside the run root: the directories JiuwenSwarm's prompt names to every
+    worker ("Installed Skill root", "Installed Agent groups", ...), so a path the model was told about exists in its
+    shell too. Only mcp_hub of mcp/, whose credentials/ sits next to it (bwrap cannot filter by name the way
+    check_outside_read does), and never config/ (model API keys). Plus, per worker, its own workspace (read-only) and
+    its JiuwenSwarm temporary working directory (see WORK_DIR_RX)."""
+    ws, data = jiuwen_dirs()
+    return (ws / "skills", data / ".agent_teams" / "agent_groups", ws / "mcp" / "mcp_hub",
+            ws / "plugins" / "agent_templates", ws / "plugins" / "plugin_packages")
 # A team member's "Temporary working directory" (its shell cwd): <team>/team-workspace/artifacts/<date>/<chat>/work/
 # <member>. Anything else offered as the cwd (the server's own directory, when none is set) is not mounted.
 WORK_DIR_RX = re.compile(r"/\.agent_teams/[^/]+/team-workspace/artifacts/[^/]+/[^/]+/work/[^/]+$")
@@ -84,6 +99,12 @@ SANDBOX_ARGS_DIR = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser
 # outside the team should install from what a role wrote. Installs copy out of it (UV_LINK_MODE=copy): hardlinks fail
 # across bind mounts anyway, and a hardlinked venv file edited in one arm would change the cache for every other.
 SANDBOX_UV_CACHE = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "repro-uv-cache"
+# The Pythons uv installs from a sandboxed shell (UV_PYTHON_INSTALL_DIR). Inside the sandbox HOME is /tmp, so uv put
+# them in /tmp/.local/share/uv/python, which is gone when the call ends: a venv made with `uv venv --python 3.12`
+# then points at nothing from the next call on (2026-11-09: a builder rebuilt its venv on the system Python instead).
+# Persistent and shared like the cache: read-write for shells that write, read-only for the others, which run the
+# builders' venvs and so need the interpreter those venvs link to.
+SANDBOX_UV_PYTHON = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "repro-uv-python"
 SECRET_NAME_RX = re.compile(r"(^\.env(\..*)?$|\.(pem|key|p12|pfx)$|^id_(rsa|ed25519|ecdsa)|secret|credential|token)", re.I)
 
 
@@ -126,7 +147,7 @@ def check_outside_read(path: Path, own_workspace: str | None) -> str:
     """`path` (outside the run root) if it is in an allowed read area, else raise Denied. Symlinks are resolved
     first, so a link inside an allowed area cannot point at config/ or anywhere else."""
     real = Path(os.path.realpath(path))
-    tops = [Path(os.path.realpath(t)) for t in OUTSIDE_READ]
+    tops = [Path(os.path.realpath(t)) for t in outside_read()]
     if own_workspace:
         tops.append(Path(os.path.realpath(own_workspace)))
     if not any(_within(real, t) for t in tops):
@@ -172,17 +193,17 @@ def work_dir_ok(work_dir: str | None, root: str) -> str | None:
     real = Path(os.path.realpath(work_dir))
     base = Path(os.path.realpath(root))
     if (not real.is_dir() or not WORK_DIR_RX.search(real.as_posix())
-            or not _within(real, Path(os.path.realpath(JIUWENSWARM_HOME)))
+            or not _within(real, Path(os.path.realpath(jiuwen_dirs()[1])))
             or _within(base, real) or _within(real, base)):
         return None
     return str(real)
 
 
 def outside_mounts(policy: dict, root: str, own_workspace: str | None, work_dir: str | None) -> list[str]:
-    """bwrap options mounting what JiuwenSwarm tells the worker about outside the run root (see SANDBOX_READ)."""
+    """bwrap options mounting what JiuwenSwarm tells the worker about outside the run root (see sandbox_read)."""
     a: list[str] = []
     base = Path(os.path.realpath(root))
-    ro = [Path(p) for p in SANDBOX_READ] + ([Path(own_workspace)] if own_workspace else [])
+    ro = [Path(p) for p in sandbox_read()] + ([Path(own_workspace)] if own_workspace else [])
     for p in ro:
         real = Path(os.path.realpath(p))
         if real.is_dir() and not _within(base, real) and not _within(real, base):
@@ -196,13 +217,16 @@ def outside_mounts(policy: dict, root: str, own_workspace: str | None, work_dir:
 def bwrap_args(policy: dict, root: str, experiment: str | None, own_workspace: str | None = None,
                work_dir: str | None = None) -> list[str]:
     """bubblewrap's options for this role: only its paths mounted (plus what JiuwenSwarm advertises to every worker,
-    see SANDBOX_READ), `root` as the working directory."""
+    see sandbox_read), `root` as the working directory."""
     home = Path.home()
     # uv and the Pythons it installed (venvs symlink into them); not the rest of ~/.local/share/uv, which holds
     # uv's stored index credentials
     uv_bin, uv_share = home / ".local" / "bin", home / ".local" / "share" / "uv" / "python"
     path_env = ":".join([str(uv_bin), "/usr/local/bin", "/usr/bin", "/bin"])
-    a = ["--die-with-parent", "--unshare-all", "--clearenv",
+    # No --die-with-parent: with it, bwrap's pid-1 init dies with the call and takes the whole pid namespace along,
+    # so `cmd &` was killed the moment the shell call returned. Without it a background job outlives the call (as it
+    # does unsandboxed) and keeps its sandbox; the pid namespace still hides and shields host processes.
+    a = ["--unshare-all", "--clearenv",
          "--setenv", "PATH", path_env, "--setenv", "HOME", "/tmp", "--setenv", "LANG", "C.UTF-8",
          "--setenv", "UV_CACHE_DIR", "/tmp/uv-cache", "--setenv", "UV_LINK_MODE", "copy",
          "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib",
@@ -219,11 +243,17 @@ def bwrap_args(policy: dict, root: str, experiment: str | None, own_workspace: s
         if p.is_dir():
             a += ["--ro-bind", str(p), str(p)]
     a += outside_mounts(policy, root, own_workspace, work_dir)
-    if policy.get("shell") == "rw":  # read-only shells keep the empty /tmp/uv-cache: they install nothing
+    writes = policy.get("shell") == "rw"
+    if writes:  # read-only shells keep the empty /tmp/uv-cache: they install nothing
         SANDBOX_UV_CACHE.mkdir(mode=0o700, parents=True, exist_ok=True)
         cache = str(SANDBOX_UV_CACHE)
         a[a.index("/tmp/uv-cache")] = cache
         a += ["--bind", cache, cache]
+    SANDBOX_UV_PYTHON.mkdir(mode=0o700, parents=True, exist_ok=True)
+    pythons = str(SANDBOX_UV_PYTHON)
+    # UV_PYTHON_INSTALL_BIN=0: `uv python install` would also link executables into ~/.local/bin, mounted read-only
+    a += ["--setenv", "UV_PYTHON_INSTALL_DIR", pythons, "--setenv", "UV_PYTHON_INSTALL_BIN", "0",
+          "--bind" if writes else "--ro-bind", pythons, pythons]
     base = Path(root)
     for r in prefixes(policy, "read", experiment):
         if (base / r).exists():

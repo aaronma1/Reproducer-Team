@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -32,6 +33,7 @@ ROLES = {k: {"role": k, **v["policy"]} for k, v in json.loads((TEAM / "roles.jso
 def sandbox_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(pr, "SANDBOX_ARGS_DIR", tmp_path / "sandbox-args")
     monkeypatch.setattr(pr, "SANDBOX_UV_CACHE", tmp_path / "uv-cache")
+    monkeypatch.setattr(pr, "SANDBOX_UV_PYTHON", tmp_path / "uv-python")
     return tmp_path / "sandbox-args"
 
 
@@ -106,9 +108,12 @@ def test_shell_is_wrapped_in_bubblewrap_with_only_the_roles_paths(run, monkeypat
     assert argv[0] == "bwrap" and argv[-3:] == ["bash", "-c", "python train.py"]
     binds = [(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == "--bind"]
     cache = str(pr.SANDBOX_UV_CACHE)
-    assert binds == [(cache, cache), (f"{run}/repo/arms/exp1", f"{run}/repo/arms/exp1")]   # uv's shared cache
+    pythons = str(pr.SANDBOX_UV_PYTHON)
+    assert binds == [(cache, cache), (pythons, pythons),                # uv's shared cache and Pythons
+                     (f"{run}/repo/arms/exp1", f"{run}/repo/arms/exp1")]
     env = {argv[i + 1]: argv[i + 2] for i, a in enumerate(argv) if a == "--setenv"}
     assert env["UV_CACHE_DIR"] == cache and env["UV_LINK_MODE"] == "copy"
+    assert env["UV_PYTHON_INSTALL_DIR"] == pythons and env["UV_PYTHON_INSTALL_BIN"] == "0"
     assert argv.index("--share-net") > argv.index("--unshare-all")   # the builder has web access (order matters)
     mounted = [argv[i + 1] for i, a in enumerate(argv) if a in ("--bind", "--ro-bind")]
     assert not any(m.endswith("/.local/share/uv") or "credentials" in m for m in mounted)   # uv's stored credentials
@@ -118,6 +123,7 @@ def test_shell_is_wrapped_in_bubblewrap_with_only_the_roles_paths(run, monkeypat
     audit = sandbox_argv(ok("audit", run, "bash", {"command": "ls"})["command"])
     assert "--bind" not in audit and "--share-net" not in audit       # read-only, offline, no shared cache
     assert cache not in audit
+    assert pythons in [audit[i + 1] for i, a in enumerate(audit) if a == "--ro-bind"]   # runs the builders' venvs
     denied("lead", run, "bash", {"command": "ls"})
     denied("builder", run, "powershell", {"command": "ls"}, experiment="exp1")
 
@@ -278,8 +284,7 @@ def home(tmp_path, monkeypatch):
     (h / "config/config.yaml").write_text("api_key: sk-secret")
     (h / "agent/workspace/skills/s1/.env").write_text("KEY=1")
     (h / "agent/workspace/skills/s1/cfg").symlink_to(h / "config")
-    monkeypatch.setattr(pr, "OUTSIDE_READ", (h / "agent/workspace/skills", h / "agent/workspace/mcp",
-                                             h / ".agent_teams/agent_groups"))
+    monkeypatch.setattr(pr, "jiuwen_dirs", lambda: (h / "agent/workspace", h))
     return h
 
 
@@ -382,10 +387,7 @@ def jw(tmp_path, monkeypatch):
     (root / "repo/arms/exp1").mkdir(parents=True)
     (root / "paper.pdf").write_bytes(b"%PDF")
     (chat / "work/b1").mkdir(parents=True)
-    monkeypatch.setattr(pr, "JIUWENSWARM_HOME", h)
-    monkeypatch.setattr(pr, "SANDBOX_READ", tuple(h / p for p in (
-        "agent/workspace/skills", ".agent_teams/agent_groups", "agent/workspace/mcp/mcp_hub",
-        "agent/workspace/plugins/agent_templates", "agent/workspace/plugins/plugin_packages")))
+    monkeypatch.setattr(pr, "jiuwen_dirs", lambda: (h / "agent/workspace", h))
     monkeypatch.setattr(pr.shutil, "which", lambda _: "/usr/bin/bwrap")
     return {"home": h, "root": str(root), "work": str(chat / "work/b1"),
             "ws": str(h / ".agent_teams/team1/workspaces/b1_workspace"), "chat": chat}
@@ -440,3 +442,60 @@ def test_a_builder_shell_reaches_its_work_dir_and_skills_but_not_config(jw, monk
         pytest.skip("bwrap cannot create namespaces here")
     assert r.stdout.split() == ["skill", "noconfig", "nocreds", "ro"], r.stderr
     assert Path(jw["work"], "ok").exists() and (pr.SANDBOX_UV_CACHE / "ok").exists()   # the shared uv cache persists
+
+
+def test_jiuwenswarm_dirs_follow_its_data_dir_variables(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "jiuwenswarm.common.utils", None)   # outside JiuwenSwarm: resolve as it does
+    monkeypatch.delenv("JIUWENSWARM_DATA_DIR", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_HOME", raising=False)
+    assert pr.jiuwen_dirs() == (Path.home() / ".jiuwenswarm/agent/workspace", Path.home() / ".jiuwenswarm")
+    monkeypatch.setenv("JIUWENSWARM_HOME", str(tmp_path / "u"))                # the user home, not the data dir
+    assert pr.jiuwen_dirs()[1] == tmp_path / "u/.jiuwenswarm"
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(tmp_path / "inst"))         # a named instance wins
+    ws, data = pr.jiuwen_dirs()
+    assert (ws, data) == (tmp_path / "inst/agent/workspace", tmp_path / "inst")
+    assert data / ".agent_teams/agent_groups" in pr.outside_read() and ws / "mcp/mcp_hub" in pr.sandbox_read()
+    assert not any(p.name in ("config", "credentials") for p in pr.outside_read() + pr.sandbox_read())
+
+
+def test_jiuwenswarm_dirs_come_from_jiuwenswarm_when_it_is_running(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    fake = SimpleNamespace(get_agent_workspace_dir=lambda: str(tmp_path / "t/agent/workspace"),
+                           get_user_workspace_dir=lambda: str(tmp_path / "t"))
+    monkeypatch.setitem(sys.modules, "jiuwenswarm.common.utils", fake)
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(tmp_path / "ignored"))
+    assert pr.jiuwen_dirs() == (tmp_path / "t/agent/workspace", tmp_path / "t")
+
+
+@pytest.mark.skipif(not shutil.which("bwrap"), reason="no bwrap")
+def test_pythons_uv_installs_outlive_the_call_and_are_read_only_to_readers(run, monkeypatch):
+    """uv put a Python it downloaded under HOME=/tmp, wiped at the end of the call, so the venv broke on the next one."""
+    def sh(role, cmd):
+        c = ok(role, run, "bash", {"command": cmd}, experiment="exp1")["command"]
+        r = subprocess.run(["bash", "-c", c], capture_output=True, text=True)
+        if r.returncode and "Operation not permitted" in r.stderr:
+            pytest.skip("bwrap cannot create namespaces here")
+        return r.stdout.strip()
+    assert sh("builder", "mkdir -p \"$UV_PYTHON_INSTALL_DIR/cpython-x/bin\" && printf ok > \"$UV_PYTHON_INSTALL_DIR/cpython-x/bin/python\" && echo made") == "made"
+    assert sh("builder", "cat \"$UV_PYTHON_INSTALL_DIR/cpython-x/bin/python\"") == "ok"     # still there next call
+    assert sh("audit", "cat \"$UV_PYTHON_INSTALL_DIR/cpython-x/bin/python\"; touch \"$UV_PYTHON_INSTALL_DIR/y\" 2>/dev/null || echo ro") == "okro"
+
+
+@pytest.mark.skipif(not shutil.which("bwrap"), reason="no bwrap")
+def test_a_background_job_outlives_the_call_but_still_cannot_touch_host_processes(run, tmp_path):
+    victim = subprocess.Popen(["sleep", "30"])                          # a host process of the same user
+    try:
+        cmd = ok("builder", run, "bash", {"command": f"(sleep 2; echo done > repo/arms/exp1/bg.txt) >/dev/null 2>&1 & "
+                                                     f"kill {victim.pid} 2>/dev/null || echo shielded"},
+                 experiment="exp1")["command"]
+        r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=10)
+        if r.returncode and "Operation not permitted" in r.stderr:
+            pytest.skip("bwrap cannot create namespaces here")
+        assert r.stdout.strip() == "shielded" and victim.poll() is None   # returned at once; host pid not reachable
+        out = Path(run, "repo/arms/exp1/bg.txt")
+        deadline = time.time() + 10
+        while not out.exists() and time.time() < deadline:
+            time.sleep(0.2)
+        assert out.read_text().strip() == "done"                           # the job ran on after the call
+    finally:
+        victim.kill()
