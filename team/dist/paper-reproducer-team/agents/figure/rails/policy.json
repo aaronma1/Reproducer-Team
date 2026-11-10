@@ -9,5 +9,5 @@
   "shell": null,
   "gpu": null,
   "web": false,
-  "sandbox": "bwrap"
+  "sandbox": "auto"
 }

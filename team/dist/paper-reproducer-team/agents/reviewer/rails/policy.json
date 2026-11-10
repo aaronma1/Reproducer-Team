@@ -10,5 +10,5 @@
   "shell": "ro",
   "gpu": "run",
   "web": true,
-  "sandbox": "bwrap"
+  "sandbox": "auto"
 }

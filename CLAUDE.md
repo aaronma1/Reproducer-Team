@@ -12,6 +12,7 @@ uv run pytest                                   # everything; ~10 s, real-bwrap 
 uv run pytest tests/test_team.py                # team package + policy rail
 uv run python team/build.py --bwrap             # rebuild team/dist/ (the zip you import into JiuwenSwarm)
 uv run python team/build.py                     # same, shells unsandboxed
+uv run python team/build.py --sandbox auto      # bwrap where the host can run it, else unsandboxed (for the Hub)
 ```
 
 The installed team uses `--bwrap`. Rebuild with the same flag you mean to import, then import

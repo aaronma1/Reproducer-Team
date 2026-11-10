@@ -5,5 +5,5 @@
   "shell": null,
   "gpu": "wait",
   "web": false,
-  "sandbox": "bwrap"
+  "sandbox": "auto"
 }

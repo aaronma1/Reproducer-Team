@@ -12,5 +12,5 @@
   "shell": "rw",
   "gpu": null,
   "web": false,
-  "sandbox": "bwrap"
+  "sandbox": "auto"
 }

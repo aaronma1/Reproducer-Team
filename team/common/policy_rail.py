@@ -14,6 +14,8 @@ The JiuwenSwarm port of ``framework/tools.py``: the role table lives in ``policy
   environment, and the network only for roles with web access; a missing ``bwrap`` then refuses every shell call.
   With ``"sandbox": "none"`` (the default build) they run as given, starting in the role's own directory (the bash
   tool's ``workdir``): the role's paths bind the file tools only, and the persona asks the role to stay there.
+  With ``"sandbox": "auto"`` (``team/build.py --sandbox auto``, the build to share) a shell runs as with "bwrap" when
+  this host can run bubblewrap (checked once per worker by running it), else as with "none".
 - GPU tools (the gpu_runner MCP, any host prefix) are allowed by level: ro (status, output, list), wait (also
   wait), run (also submit, cancel), rw (also download_job_files). Submitted dirs must be readable, download targets writable.
 - Web tools need ``web``. Other tools (todo, skills, structured_output, tool_search) pass.
@@ -24,10 +26,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +41,7 @@ except ImportError:  # pragma: no cover
     AgentRail = object
 
 POLICY_FILE = Path(__file__).with_name("policy.json")
-SANDBOXES = ("bwrap", "none")  # how shell commands run; team/build.py writes it into every policy.json
+SANDBOXES = ("bwrap", "none", "auto")  # how shell commands run; team/build.py writes it into every policy.json
 ROOT_RX = re.compile(r"All files of this run are under (/\S+?)\. Every relative path")
 EXPERIMENT_RX = re.compile(r"You reproduce experiment `([a-z0-9][a-z0-9_-]*)`")
 
@@ -110,6 +114,29 @@ SECRET_NAME_RX = re.compile(r"(^\.env(\..*)?$|\.(pem|key|p12|pfx)$|^id_(rsa|ed25
 
 class Denied(Exception):
     pass
+
+
+_BWRAP_USABLE: bool | None = None
+
+
+def bwrap_usable() -> bool:
+    """Whether bubblewrap is installed and can create the namespaces the sandbox uses, found out once by running it.
+    Installed is not enough: hosts that restrict unprivileged user namespaces (Ubuntu 24.04's AppArmor default, many
+    containers, WSL1) have `bwrap` on the PATH and fail every call."""
+    global _BWRAP_USABLE
+    if _BWRAP_USABLE is None:
+        exe = shutil.which("bwrap")
+        try:
+            _BWRAP_USABLE = bool(exe) and subprocess.run(
+                [exe, "--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=15).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            _BWRAP_USABLE = False
+        if not _BWRAP_USABLE:
+            logging.getLogger(__name__).warning(
+                "paper-reproducer-team: bubblewrap is %s on this host; shell commands run unsandboxed",
+                "not usable" if exe else "not installed")
+    return _BWRAP_USABLE
 
 
 def load_policy(path: Path = POLICY_FILE) -> dict:
@@ -341,6 +368,8 @@ def decide(policy: dict, root: str | None, experiment: str | None, name: str, ar
             raise Denied(f"use bash; {short} is not sandboxed for this team")
         if not root:
             raise Denied("the run root is not known yet")
+        if sandbox == "auto":
+            sandbox = "bwrap" if bwrap_usable() else "none"
         if sandbox == "none":  # nothing confines the command; start it in the role's own directory
             if target is not None and not args.get("workdir"):
                 target["workdir"] = str(shell_home(policy, root, experiment))

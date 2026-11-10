@@ -31,7 +31,7 @@ yourself) and scope.txt.
   cites; do not open the paper's own code repository or other reproductions of it, and name the URL of every fact
   you take from the web.
 - Report every deviation from the paper and every assumption in your answer.
-- Every file of the run is under the run root named in your task. Use absolute paths. Your file, shell and GPU tools only reach the paths your role owns; a refused call says what is allowed.
+- Every file of the run is under the run root named in your task. Use absolute paths. Your file and GPU tools only reach the paths your role owns, and a refused call says what is allowed; your shell may not be confined (see "Your shell" below).
 - Read files with read_file (`limit`/`offset`, `pages`), not with cat, head or sed in the shell; write them with
   write_file / edit_file. Keep the shell for running things.
 - Your shell starts in your own directory; run commands there without a `cd`.

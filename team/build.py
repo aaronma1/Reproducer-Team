@@ -1,6 +1,6 @@
 """Build the paper-reproducer-team expert team (AgentGroup) package from team/ sources.
 
-    python team/build.py [--bwrap] [--out team/dist] [--no-zip]
+    python team/build.py [--bwrap | --sandbox none|bwrap|auto] [--out team/dist] [--no-zip]
 
 Writes <out>/paper-reproducer-team/ and <out>/paper-reproducer-team.zip (the file to import or share): the group
 manifest, one expert per role in team/roles.json (persona, the RunPolicyRail with that role's policy.json, the
@@ -8,7 +8,9 @@ view_page tool), and the group-shared paper-reproducer skill with flows/reproduc
 scripts/workflow.py. Every member gets its own copy of the shared files because a package may not contain symlinks.
 `--bwrap` makes every member's shell run in a bubblewrap sandbox with only its role's paths mounted; the host running
 the team then needs `bwrap`, and a member's shell calls are refused without it. Without `--bwrap` shell commands run
-unsandboxed and the role's paths bind the file tools only. The choice is written into each member's policy.json.
+unsandboxed and the role's paths bind the file tools only. `--sandbox auto` (the build to share) sandboxes shells
+where the host can run bubblewrap and runs them unsandboxed elsewhere, with the unsandboxed persona rules in every
+case. The choice is written into each member's policy.json.
 The package README.md (the team's description in JiuwenSwarm) is team/README.md with the "Results and cost" table
 from docs/swarmflow-notes.md inserted at the top.
 Then it checks the result against the rules JiuwenSwarm's publish step applies and zips it, with the package
@@ -29,7 +31,7 @@ SKILL = "paper-reproducer"
 MEMBER_RX = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 NOTES = REPO / "docs" / "swarmflow-notes.md"
 RESULTS_HEADING = "### Results and cost"
-SANDBOXES = ("bwrap", "none")  # how members' shells run; team/common/policy_rail.py reads it from policy.json
+SANDBOXES = ("bwrap", "none", "auto")  # how members' shells run; team/common/policy_rail.py reads it from policy.json
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -52,6 +54,10 @@ SANDBOX_NOTE = {
              "paths mounted. The host needs `bwrap` installed; without it, shell calls are refused.",
     "none": "**Shell sandbox: none.** Shell commands run unsandboxed: the role's paths bind the file tools only, and a "
             "shell command can read or write anything the JiuwenSwarm user can. Build with `--bwrap` to confine them.",
+    "auto": "**Shell sandbox: bubblewrap where available.** On a Linux host that can run bubblewrap (`bwrap`), every "
+            "member's shell runs in a sandbox with only its role's paths mounted. Elsewhere (no `bwrap`, macOS, "
+            "Windows, hosts that block user namespaces) shell commands run unsandboxed and can read or write anything "
+            "the JiuwenSwarm user can; install bubblewrap to confine them.",
 }
 
 
@@ -67,6 +73,18 @@ PERSONA_TEXT = {
                       "allowed; your shell is not confined (see \"Your shell\" below).",
         "shell_ro": "must not change any file (nothing enforces it in this build; see \"Your shell\")",
     },
+    "auto": {
+        "tool_reach": "Your file and GPU tools only reach the paths your role owns, and a refused call says what is "
+                      "allowed; your shell may not be confined (see \"Your shell\" below).",
+        "shell_ro": "must not change any file (see \"Your shell\")",
+    },
+}
+SHELL_INTRO = {
+    "none": "This team was built without a shell sandbox: your shell commands run on the host exactly as you write "
+            "them, and the role rules above bind only the file tools.",
+    "auto": "Your shell runs in a sandbox only if this host supports one; otherwise your commands run on the host "
+            "exactly as you write them, and the role rules above bind only the file tools. Follow these rules either "
+            "way.",
 }
 PLACEHOLDER_RX = re.compile(r"\{\{(\w+)\}\}")
 
@@ -76,7 +94,7 @@ def render(text: str, sandbox: str) -> str:
     return PLACEHOLDER_RX.sub(lambda m: PERSONA_TEXT[sandbox][m.group(1)], text)
 
 
-def shell_note(policy: dict) -> str:
+def shell_note(policy: dict, sandbox: str = "none") -> str:
     """Persona section for a member whose shell runs unsandboxed: nothing but these instructions keeps it to its
     role's paths, so say exactly which ones (the rail starts each command in the directory named here)."""
     paths = lambda ps: ", ".join(f"`{p.replace('{experiment}', '<experiment>')}" + ("" if "." in p else "/") + "`"
@@ -89,9 +107,7 @@ def shell_note(policy: dict) -> str:
         writes = "Do not create, change or delete any file with it: your shell is read-only by instruction."
     net = ("Use the network only for what your task needs (packages, the references the paper cites)."
            if policy.get("web") else "Do not use the network.")
-    return (f"## Your shell\n\nThis team was built without a shell sandbox: your shell commands run on the host "
-            f"exactly as you write them, and the role rules above bind only the file tools. Each command starts in "
-            f"{home}; stay there. {writes} Read only {paths(policy['read'])} under the run directory, by absolute "
+    return (f"## Your shell\n\n{SHELL_INTRO[sandbox]} Each command starts in {home}; stay there. {writes} Read only {paths(policy['read'])} under the run directory, by absolute "
             f"path. Never read or touch anything outside the run directory: not your home directory, not "
             f"JiuwenSwarm's own files (its config holds API keys), not other runs or teams. {net}\n")
 
@@ -114,8 +130,8 @@ def build(out: Path, sandbox: str = "none") -> Path:
     for role, spec in roles.items():
         d = pkg / "agents" / role
         persona = (HERE / "personas" / f"{role}.md").read_text(encoding="utf-8").rstrip() + "\n\n" + team_md
-        if sandbox == "none" and (spec.get("policy") or {}).get("shell"):
-            persona = persona.rstrip() + "\n\n" + shell_note(spec["policy"])
+        if sandbox != "bwrap" and (spec.get("policy") or {}).get("shell"):
+            persona = persona.rstrip() + "\n\n" + shell_note(spec["policy"], sandbox)
         persona = render(persona, sandbox)
         (d / "persona").mkdir(parents=True)
         (d / "persona" / f"{role}.md").write_text(persona, encoding="utf-8")
@@ -191,19 +207,22 @@ def check(pkg: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", type=Path, default=HERE / "dist")
-    ap.add_argument("--bwrap", action="store_true",
-                    help="run every member's shell in a bubblewrap sandbox (the host then needs bwrap)")
+    ap.add_argument("--sandbox", choices=SANDBOXES, default="none",
+                    help="how members' shells run: none (default), bwrap (the host then needs bwrap), or auto "
+                         "(bwrap where the host can run it, unsandboxed elsewhere: the build to share)")
+    ap.add_argument("--bwrap", dest="sandbox", action="store_const", const="bwrap",
+                    help="same as --sandbox bwrap")
     ap.add_argument("--no-zip", dest="zip", action="store_false",
                     help="skip writing <out>/paper-reproducer-team.zip")
     ap.add_argument("--zip", action="store_true", help=argparse.SUPPRESS)  # the default; kept for old commands
     ap.set_defaults(zip=True)
     a = ap.parse_args()
-    pkg = build(a.out, "bwrap" if a.bwrap else "none")
+    pkg = build(a.out, a.sandbox)
     print(pkg)
-    if a.bwrap:
-        print("shell sandbox: bubblewrap (the host running the team needs `bwrap`)")
-    else:
-        print("shell sandbox: none - shell commands run unsandboxed; rebuild with --bwrap to confine them")
+    print({"bwrap": "shell sandbox: bubblewrap (the host running the team needs `bwrap`)",
+           "auto": "shell sandbox: auto - bubblewrap where the host can run it, unsandboxed elsewhere",
+           "none": "shell sandbox: none - shell commands run unsandboxed; rebuild with --bwrap to confine them",
+           }[a.sandbox])
     if a.zip:
         print(make_zip(pkg))
 

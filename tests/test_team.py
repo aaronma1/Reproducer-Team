@@ -183,6 +183,35 @@ def test_a_team_built_without_bwrap_runs_shells_as_given_but_keeps_the_other_rul
         pr.decide(ROLES["audit"], run, None, "write_file", {"file_path": f"{run}/x"}, sandbox="none")
 
 
+@pytest.mark.parametrize("usable", [True, False])
+def test_an_auto_team_sandboxes_where_bubblewrap_works_and_runs_unsandboxed_elsewhere(run, monkeypatch, usable):
+    monkeypatch.setattr(pr.shutil, "which", lambda _: "/usr/bin/bwrap")   # installed either way: usable is the test
+    monkeypatch.setattr(pr, "bwrap_usable", lambda: usable)
+    args = {"command": "ls"}
+    pr.decide(ROLES["builder"], run, "exp1", "bash", args, sandbox="auto")
+    if usable:
+        assert args["command"].startswith("bwrap --args 3 ") and "workdir" not in args
+    else:
+        assert args == {"command": "ls", "workdir": f"{run}/repo/arms/exp1"}
+
+
+def test_bubblewrap_counts_as_usable_only_if_it_runs(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, b"", b"bwrap: setting up uid map: Permission denied")
+
+    monkeypatch.setattr(pr, "_BWRAP_USABLE", None)
+    monkeypatch.setattr(pr.shutil, "which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr(pr.subprocess, "run", fake_run)
+    assert pr.bwrap_usable() is False and pr.bwrap_usable() is False
+    assert len(calls) == 1                                              # probed once per worker
+    monkeypatch.setattr(pr, "_BWRAP_USABLE", None)
+    monkeypatch.setattr(pr.shutil, "which", lambda _: None)
+    assert pr.bwrap_usable() is False and len(calls) == 1               # not installed: nothing to run
+
+
 def test_the_rail_takes_the_sandbox_from_its_policy(tmp_path):
     f = tmp_path / "policy.json"
     f.write_text(json.dumps({"role": "builder", "sandbox": "none"}))
@@ -248,14 +277,15 @@ def test_build_writes_a_package_that_passes_the_publish_rules(tmp_path):
         (ROOT / "flows" / "reproducer_flow.py").read_text()
 
 
-@pytest.mark.parametrize("sandbox", ["none", "bwrap"])
+@pytest.mark.parametrize("sandbox", ["none", "bwrap", "auto"])
 def test_build_writes_the_shell_sandbox_into_every_policy_and_the_readme(tmp_path, sandbox):
     pkg = build.build(tmp_path, sandbox)
     policies = list((pkg / "agents").glob("*/rails/policy.json"))
     assert len(policies) == len(ROLES)
     assert {json.loads(p.read_text())["sandbox"] for p in policies} == {sandbox}
     head = (pkg / "README.md").read_text().split("## Results so far")[0]
-    assert ("bubblewrap" if sandbox == "bwrap" else "Shell sandbox: none") in head
+    assert {"bwrap": "Shell sandbox: bubblewrap.", "none": "Shell sandbox: none",
+            "auto": "Shell sandbox: bubblewrap where available"}[sandbox] in head
     persona = lambda r: (pkg / "agents" / r / "persona" / f"{r}.md").read_text()
     assert not any("{{" in persona(r) for r in ROLES)                   # every placeholder filled
     assert all("use edit_file on the lines that change" in persona(r) for r in ("builder", "tuner", "evaluator"))
@@ -265,7 +295,8 @@ def test_build_writes_the_shell_sandbox_into_every_policy_and_the_readme(tmp_pat
         assert "your shell is read-only." in persona("reviewer") and "Your\nshell is read-only:" in persona("audit")
         return
     assert "shell and GPU tools only reach" not in persona("builder")   # no claim the shell is confined
-    assert "your shell is not confined" in persona("builder")
+    assert ("your shell may not be confined" if sandbox == "auto" else "your shell is not confined") in persona("builder")
+    assert "## Your shell" in persona("builder") and "## Your shell" in persona("audit")
     assert "is read-only" not in persona("reviewer").split("## Your shell")[0]
     assert "must not change any file" in persona("audit")
     assert "## Your shell" not in persona("lead") and "## Your shell" not in persona("watch")   # no shell at all

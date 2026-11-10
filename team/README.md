@@ -81,6 +81,7 @@ cropped panel to a JPEG to open with `read_file`.
 python team/build.py                # -> team/dist/paper-reproducer-team/ and team/dist/paper-reproducer-team.zip
 python team/build.py --no-zip       # directory only
 python team/build.py --bwrap        # members' shells run in a bubblewrap sandbox (host needs bwrap)
+python team/build.py --sandbox auto # bubblewrap where the host can run it, unsandboxed elsewhere (the build to share)
 ```
 
 1. Import it in JiuwenSwarm: Web, Agent management, Expert Teams, import `team/dist/paper-reproducer-team.zip`
@@ -103,8 +104,14 @@ The host needs `uv` in `~/.local/bin` for Python environments.
 ### Shell sandbox: `--bwrap`
 
 The shell sandbox is chosen when the team is built and written into every member's `rails/policy.json`
-(`"sandbox": "bwrap"` or `"none"`). The build prints which one it used, and the package README says it in its first
-line, so an imported team shows its mode.
+(`"sandbox": "bwrap"`, `"none"` or `"auto"`). The build prints which one it used, and the package README says it in
+its first line, so an imported team shows its mode.
+
+`--sandbox auto` is for a package other people install: on the first shell call each member's rail runs `bwrap` once
+(`policy_rail.bwrap_usable`). If it works, shells behave as in the `--bwrap` column below; if `bwrap` is missing or
+cannot create namespaces (macOS, Windows, Ubuntu 24.04's default AppArmor restriction, many containers), they behave as
+in the default column and the rail logs a warning. Its personas always carry the default build's "Your shell"
+section, since the build cannot know which case a host is in.
 
 | | `python team/build.py --bwrap` | `python team/build.py` (default) |
 | --- | --- | --- |
