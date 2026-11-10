@@ -5,15 +5,17 @@ KINDS = [
     ("look around (ls/find/tree/pwd/which/wc)", r"^(ls|find|tree|pwd|which|wc|du|stat|file|nproc)\b"),
     ("read a file (cat/head/tail/sed -n/grep)", r"^(cat|head|tail|sed -n|grep|rg|awk|less|jq)\b"),
     ("read the paper text (pdf/pypdf/paper.txt)", r"pypdf|PdfReader|pdftotext|paper\.txt|\.pgtxt|pgtxt|paper\.pdf"),
-    ("env / install (uv venv/pip/import check)", r"uv (venv|pip|sync|add)|pip install|import (torch|numpy)|__version__|python3? -V"),
+    ("env / install (uv venv/pip/import check)", r"uv (venv|pip|sync|add)|pip install|-c ['\"]import \w+['\"]|__version__|python3? -V"),
     ("write a file via shell (heredoc/echo >/cp/mkdir)", r"<<|^(echo|printf).*>|^cp |^mkdir|^touch|^rm "),
     ("run code (python script / -c)", r"python3?\b|\.venv/bin/python"),
 ]
 calls = []
 pending = {}
+builders = {(d.get("event") or {}).get("member_id") for d in L
+            if (d.get("event") or {}).get("agent_template") == "builder"}  # from team.member.spawned events
 for d in L:
     m = d.get("member_name") or ""
-    if "\"par\", 5" not in m and "builder" not in m:
+    if m not in builders and "builder" not in m:
         continue
     if d.get("event_type") == "chat.tool_call":
         tc = d.get("tool_call") or {}
